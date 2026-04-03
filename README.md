@@ -65,6 +65,7 @@ await window.ApliNiBrowserDebuggingExtension(token[, options])
 
 ```js
 const send = await window.ApliNiBrowserDebuggingExtension('your-bridge-token');
+
 const result = await send({ action: 'waitUrlMatch', pattern: /google\.com/ });
 
 console.log(result);
@@ -73,11 +74,28 @@ console.log(result);
 userscript 示例：
 
 ```js
-const BRIDGE_TOKEN = 'replace-with-extension-token';
-const debugSend = async (payload) => {
-  const send = await unsafeWindow.ApliNiBrowserDebuggingExtension(BRIDGE_TOKEN);
-  return send(payload);
-};
+// ==UserScript==
+// @name         autoext test loginGoogle
+// @namespace    autoext
+// @version      0.1.0
+// @description  使用扩展 bridge 调用 loginGoogle 流程
+// @match        *://*/*
+// @grant        unsafeWindow
+// ==/UserScript==
+
+(async function () {
+	'use strict';
+	
+	const BRIDGE_TOKEN = 'your-bridge-token';
+	const debugSend = await unsafeWindow.ApliNiBrowserDebuggingExtension(BRIDGE_TOKEN);
+
+	await debugSend({
+		action: 'click',
+		selector: 'button',
+		selectorText: '下一步',
+	});
+
+})();
 ```
 
 其中 `BRIDGE_TOKEN` 应当由可信脚本自行持有，并与扩展设置页中的值保持一致。
