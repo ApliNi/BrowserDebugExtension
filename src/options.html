@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>扩展设置</title>
+    <style>
+      * {
+        box-sizing: border-box;
+        border-radius: 0;
+      }
+
+      html,
+      body {
+        margin: 0;
+        min-height: 100%;
+      }
+
+      body {
+        background: #f5f5f3;
+        color: #111111;
+        font: 14px/1.5 "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+      }
+
+      .page {
+        max-width: 640px;
+        margin: 0 auto;
+        padding: 48px 24px;
+      }
+
+      .page__header {
+        margin-bottom: 24px;
+      }
+
+      .page__title {
+        margin: 0;
+        font-size: 24px;
+        font-weight: 600;
+      }
+
+      .page__desc {
+        margin: 8px 0 0;
+        color: #666666;
+      }
+
+      .panel {
+        border: 1px solid #d9d9d4;
+        background: #ffffff;
+        padding: 24px;
+      }
+
+      .field {
+        display: block;
+      }
+
+      .field__label {
+        display: block;
+        margin-bottom: 8px;
+        font-size: 13px;
+        font-weight: 600;
+      }
+
+      .field__input {
+        width: 100%;
+        height: 44px;
+        padding: 0 12px;
+        border: 1px solid #bdbdb7;
+        background: #fafaf8;
+        color: #111111;
+        font: 14px/1.5 ui-monospace, "Cascadia Code", Consolas, monospace;
+        outline: none;
+      }
+
+      .field__input:focus {
+        border-color: #111111;
+        background: #ffffff;
+      }
+
+      .field__input::placeholder {
+        color: #8a8a84;
+      }
+
+      .field__hint {
+        margin: 12px 0 0;
+        color: #666666;
+      }
+
+      .actions {
+        display: flex;
+        gap: 8px;
+        margin-top: 20px;
+      }
+
+      .button {
+        min-width: 96px;
+        height: 40px;
+        padding: 0 16px;
+        border: 1px solid #bdbdb7;
+        background: transparent;
+        color: #111111;
+        font: inherit;
+        cursor: pointer;
+      }
+
+      .button:hover {
+        background: #f3f3f0;
+      }
+
+      .button--primary {
+        border-color: #111111;
+        background: #111111;
+        color: #ffffff;
+      }
+
+      .button--primary:hover {
+        background: #222222;
+      }
+
+      .status {
+        min-height: 20px;
+        margin: 12px 0 0;
+        padding-left: 10px;
+        border-left: 2px solid transparent;
+        font-size: 13px;
+      }
+
+      .status[data-state="success"] {
+        border-left-color: #1f6b45;
+        color: #1f6b45;
+      }
+
+      .status[data-state="error"] {
+        border-left-color: #a33a2b;
+        color: #a33a2b;
+      }
+    </style>
+  </head>
+  <body>
+    <main class="page">
+      <header class="page__header">
+        <h1 class="page__title">Bridge Token</h1>
+        <p class="page__desc">用于页面桥接鉴权，仅保存在当前浏览器本地。</p>
+      </header>
+
+      <section class="panel">
+        <label class="field" for="token-input">
+          <span class="field__label">Access Token</span>
+          <input id="token-input" class="field__input" type="text" spellcheck="false" autocomplete="off" placeholder="请输入 token">
+        </label>
+
+        <p class="field__hint">默认自动生成 32 位字符串，修改后立即生效。</p>
+
+        <div class="actions">
+          <button id="save-button" class="button button--primary" type="button">保存</button>
+          <button id="regen-button" class="button" type="button">重新生成</button>
+        </div>
+
+        <p id="status" class="status" aria-live="polite"></p>
+      </section>
+    </main>
+
+    <script src="options.js"></script>
+  </body>
+</html>
