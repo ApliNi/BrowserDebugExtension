@@ -581,26 +581,6 @@ console.log(config.value);
 await send({ action: 'kvDel', key: 'siteMode' });
 ```
 
-## `test.user.js` 的作用
-
-仓库里的 `test.user.js` 不是扩展核心，而是示例脚本，主要演示：
-
-- 如何等待桥接 ready
-- 如何调用 `debugSend`
-- 如何组合 `click / input / inputKey / waitUrlMatch`
-- 如何根据不同站点执行自动化逻辑
-
-如果你只想把本项目当成桥接扩展使用，可以保留扩展部分，自行改写或移除 `test.user.js`。
-
-## 注意事项
-
-- 本项目依赖 `chrome.debugger` 权限
-- 扩展会在匹配页面注入桥接脚本
-- `selectorText` 使用的是“包含匹配”，不是完全相等匹配
-- `kvSet` 只接受字符串值
-- 旧参数 `afterFoundMs` 已被明确禁用，请使用 `waitAfterFoundMs`
-- `input` 是直接赋值，`inputKey` 是模拟按键，两者适用场景不同
-
 ## 适用场景
 
 - userscript 借助扩展能力执行受控自动化
@@ -608,9 +588,6 @@ await send({ action: 'kvDel', key: 'siteMode' });
 - 等待页面稳定后继续执行下一步
 - 用扩展存储为脚本保存少量字符串配置
 
-## 后续可扩展方向
+---
 
-- 新增截图、读取文本、读取属性等动作
-- 为 action 增加更稳定的元素过滤策略
-- 提供更正式的 userscript SDK 包装层
-- 把 token 与共享工具提取成公共模块
+友链: https://linux.do/
