@@ -2,9 +2,11 @@
 
 const DEBUGGER_PROTOCOL_VERSION = "1.3";
 const attachedTabs = new Set();
+const pageEnabledTabs = new Set();
 
 // per-tab network tracking state
 const netStates = new Map(); // tabId -> { enabled, pending:Set, lastActivity:number }
+const foregroundMaskStates = new Map(); // tabId -> { enabled, config, scriptId, appliedAt }
 
 function normalizeArea(area) {
   return area === "sync" ? "sync" : "local";
@@ -91,6 +93,13 @@ async function ensureDebuggerAttached(tabId) {
   }
 }
 
+async function ensurePageEnabled(tabId) {
+  if (pageEnabledTabs.has(tabId)) return;
+
+  await chrome.debugger.sendCommand(attachTarget(tabId), "Page.enable");
+  pageEnabledTabs.add(tabId);
+}
+
 async function ensureNetworkEnabled(tabId) {
   const st = getNetState(tabId);
   if (st.enabled) return;
@@ -103,7 +112,9 @@ async function ensureNetworkEnabled(tabId) {
 chrome.debugger.onDetach.addListener((source, reason) => {
   if (source?.tabId != null) {
     attachedTabs.delete(source.tabId);
+    pageEnabledTabs.delete(source.tabId);
     netStates.delete(source.tabId);
+    foregroundMaskStates.delete(source.tabId);
   }
 });
 
@@ -251,6 +262,466 @@ function buildFindAndActExpression({ action, selector, selectorText, value, afte
   return { ok: false, error: "Unknown action", action };
 })()
   `.trim();
+}
+
+function normalizeForegroundMaskConfig(config) {
+  return {
+    maskVisibility: config?.maskVisibility !== false,
+    maskFocus: config?.maskFocus !== false,
+    maskEvents: config?.maskEvents !== false,
+    maskRAF: config?.maskRAF !== false,
+  };
+}
+
+function buildForegroundMaskExpression(config, mode = "install") {
+  const payload = JSON.stringify({
+    config: normalizeForegroundMaskConfig(config),
+    mode,
+  });
+
+  return `
+(() => {
+  const payload = ${payload};
+  const bridge = window.ApliNiBrowserDebuggingExtension;
+  if (typeof bridge !== "function") {
+    return { ok: false, error: "Bridge is not available in page context" };
+  }
+
+  const stateKey = Symbol.for("ApliNiBrowserDebuggingExtension.foregroundMaskState");
+  const state = bridge[stateKey] || (bridge[stateKey] = {
+    installed: false,
+    config: null,
+    originals: {},
+    listeners: {
+      document: new WeakMap(),
+      window: new WeakMap(),
+    },
+    raf: {
+      nextId: 1,
+      timers: new Map(),
+    },
+  });
+
+  const eventsToBlock = new Set(["visibilitychange", "blur"]);
+
+  const saveOriginal = (name, value) => {
+    if (!Object.prototype.hasOwnProperty.call(state.originals, name)) {
+      state.originals[name] = value;
+    }
+  };
+
+  const defineValue = (target, key, value) => {
+    Object.defineProperty(target, key, {
+      configurable: true,
+      writable: true,
+      value,
+    });
+  };
+
+  const restoreValue = (target, key, original) => {
+    if (original) {
+      Object.defineProperty(target, key, original);
+      return;
+    }
+
+    delete target[key];
+  };
+
+  const applyPropertyMasks = (nextConfig) => {
+    if (nextConfig.maskVisibility) {
+      const hiddenDescriptor = Object.getOwnPropertyDescriptor(Document.prototype, "hidden");
+      const visibilityStateDescriptor = Object.getOwnPropertyDescriptor(Document.prototype, "visibilityState");
+      saveOriginal("Document.hidden", hiddenDescriptor);
+      saveOriginal("Document.visibilityState", visibilityStateDescriptor);
+
+      if (hiddenDescriptor?.configurable) {
+        Object.defineProperty(Document.prototype, "hidden", {
+          configurable: true,
+          enumerable: hiddenDescriptor.enumerable,
+          get() {
+            return false;
+          },
+        });
+      }
+
+      if (visibilityStateDescriptor?.configurable) {
+        Object.defineProperty(Document.prototype, "visibilityState", {
+          configurable: true,
+          enumerable: visibilityStateDescriptor.enumerable,
+          get() {
+            return "visible";
+          },
+        });
+      }
+    }
+
+    if (nextConfig.maskFocus) {
+      saveOriginal("Document.hasFocus", Document.prototype.hasFocus);
+      defineValue(Document.prototype, "hasFocus", function hasFocus() {
+        return true;
+      });
+    }
+  };
+
+  const wrapListenerApi = (target, label) => {
+    const addKey = label + ".addEventListener";
+    const removeKey = label + ".removeEventListener";
+    saveOriginal(addKey, target.addEventListener);
+    saveOriginal(removeKey, target.removeEventListener);
+
+    defineValue(target, "addEventListener", function addEventListener(type, listener, options) {
+      if (!state.config?.maskEvents || !eventsToBlock.has(String(type))) {
+        return state.originals[addKey].call(this, type, listener, options);
+      }
+
+      if (typeof listener !== "function") {
+        return state.originals[addKey].call(this, type, listener, options);
+      }
+
+      const wrapped = function wrappedBlockedEvent(event) {
+        if (type === "blur" || type === "visibilitychange") {
+          return undefined;
+        }
+        return listener.call(this, event);
+      };
+
+      state.listeners[label].set(listener, wrapped);
+      return state.originals[addKey].call(this, type, wrapped, options);
+    });
+
+    defineValue(target, "removeEventListener", function removeEventListener(type, listener, options) {
+      const wrapped = state.listeners[label].get(listener);
+      if (wrapped) {
+        state.listeners[label].delete(listener);
+        return state.originals[removeKey].call(this, type, wrapped, options);
+      }
+
+      return state.originals[removeKey].call(this, type, listener, options);
+    });
+  };
+
+  const applyEventMasks = (nextConfig) => {
+    if (!nextConfig.maskEvents) {
+      return;
+    }
+
+    wrapListenerApi(document, "document");
+    wrapListenerApi(window, "window");
+
+    saveOriginal("document.onvisibilitychange", Object.getOwnPropertyDescriptor(document, "onvisibilitychange"));
+    saveOriginal("window.onblur", Object.getOwnPropertyDescriptor(window, "onblur"));
+    saveOriginal("window.onfocus", Object.getOwnPropertyDescriptor(window, "onfocus"));
+
+    Object.defineProperty(document, "onvisibilitychange", {
+      configurable: true,
+      enumerable: true,
+      get() {
+        return null;
+      },
+      set() {
+        return true;
+      },
+    });
+
+    Object.defineProperty(window, "onblur", {
+      configurable: true,
+      enumerable: true,
+      get() {
+        return null;
+      },
+      set() {
+        return true;
+      },
+    });
+
+    Object.defineProperty(window, "onfocus", {
+      configurable: true,
+      enumerable: true,
+      get() {
+        return null;
+      },
+      set(handler) {
+        if (typeof handler !== "function") {
+          return true;
+        }
+        return state.originals["window.addEventListener"].call(window, "focus", handler);
+      },
+    });
+  };
+
+  const applyRafMask = (nextConfig) => {
+    if (!nextConfig.maskRAF) {
+      return;
+    }
+
+    saveOriginal("window.requestAnimationFrame", window.requestAnimationFrame);
+    saveOriginal("window.cancelAnimationFrame", window.cancelAnimationFrame);
+
+    defineValue(window, "requestAnimationFrame", function requestAnimationFrame(callback) {
+      const id = state.raf.nextId++;
+      const entry = {
+        done: false,
+        nativeId: null,
+        fallbackTimer: null,
+      };
+
+      const finish = (ts) => {
+        if (entry.done) {
+          return;
+        }
+        entry.done = true;
+
+        if (entry.fallbackTimer != null) {
+          window.clearTimeout(entry.fallbackTimer);
+        }
+
+        const cancel = state.originals["window.cancelAnimationFrame"];
+        if (entry.nativeId != null && typeof cancel === "function") {
+          try {
+            cancel.call(window, entry.nativeId);
+          } catch (error) {
+            // ignore native cancel failures
+          }
+        }
+
+        state.raf.timers.delete(id);
+        callback(ts);
+      };
+
+      const raf = state.originals["window.requestAnimationFrame"];
+      if (typeof raf === "function") {
+        try {
+          entry.nativeId = raf.call(this, (ts) => {
+            finish(ts);
+          });
+        } catch (error) {
+          entry.nativeId = null;
+        }
+      }
+
+      entry.fallbackTimer = window.setTimeout(() => {
+        finish(performance.now());
+      }, 16);
+
+      state.raf.timers.set(id, entry);
+      return id;
+    });
+
+    defineValue(window, "cancelAnimationFrame", function cancelAnimationFrame(id) {
+      if (state.raf.timers.has(id)) {
+        const entry = state.raf.timers.get(id);
+        state.raf.timers.delete(id);
+        entry.done = true;
+
+        if (entry.fallbackTimer != null) {
+          window.clearTimeout(entry.fallbackTimer);
+        }
+
+        const cancel = state.originals["window.cancelAnimationFrame"];
+        if (entry.nativeId != null && typeof cancel === "function") {
+          try {
+            cancel.call(this, entry.nativeId);
+          } catch (error) {
+            // ignore native cancel failures
+          }
+        }
+        return;
+      }
+
+      const cancel = state.originals["window.cancelAnimationFrame"];
+      if (typeof cancel === "function") {
+        cancel.call(this, id);
+      }
+    });
+  };
+
+  const restore = () => {
+    restoreValue(Document.prototype, "hidden", state.originals["Document.hidden"]);
+    restoreValue(Document.prototype, "visibilityState", state.originals["Document.visibilityState"]);
+
+    if (state.originals["Document.hasFocus"]) {
+      defineValue(Document.prototype, "hasFocus", state.originals["Document.hasFocus"]);
+    }
+
+    if (state.originals["document.addEventListener"]) {
+      defineValue(document, "addEventListener", state.originals["document.addEventListener"]);
+    }
+    if (state.originals["document.removeEventListener"]) {
+      defineValue(document, "removeEventListener", state.originals["document.removeEventListener"]);
+    }
+    if (state.originals["window.addEventListener"]) {
+      defineValue(window, "addEventListener", state.originals["window.addEventListener"]);
+    }
+    if (state.originals["window.removeEventListener"]) {
+      defineValue(window, "removeEventListener", state.originals["window.removeEventListener"]);
+    }
+
+    restoreValue(document, "onvisibilitychange", state.originals["document.onvisibilitychange"]);
+    restoreValue(window, "onblur", state.originals["window.onblur"]);
+    restoreValue(window, "onfocus", state.originals["window.onfocus"]);
+
+    if (state.originals["window.requestAnimationFrame"]) {
+      defineValue(window, "requestAnimationFrame", state.originals["window.requestAnimationFrame"]);
+    }
+    if (state.originals["window.cancelAnimationFrame"]) {
+      defineValue(window, "cancelAnimationFrame", state.originals["window.cancelAnimationFrame"]);
+    }
+
+    for (const timer of state.raf.timers.values()) {
+      if (timer?.fallbackTimer != null) {
+        window.clearTimeout(timer.fallbackTimer);
+      }
+
+      const cancel = state.originals["window.cancelAnimationFrame"];
+      if (timer?.nativeId != null && typeof cancel === "function") {
+        try {
+          cancel.call(window, timer.nativeId);
+        } catch (error) {
+          // ignore native cancel failures
+        }
+      }
+    }
+    state.raf.timers.clear();
+    state.listeners.document = new WeakMap();
+    state.listeners.window = new WeakMap();
+    state.installed = false;
+    state.config = null;
+    bridge[stateKey] = state;
+    return { ok: true, restored: true };
+  };
+
+  if (payload.mode === "uninstall") {
+    return restore();
+  }
+
+  if (state.installed) {
+    restore();
+  }
+
+  state.config = payload.config;
+  applyPropertyMasks(payload.config);
+  applyEventMasks(payload.config);
+  applyRafMask(payload.config);
+  state.installed = true;
+  bridge[stateKey] = state;
+
+  return {
+    ok: true,
+    installed: true,
+    config: state.config,
+  };
+})()
+  `.trim();
+}
+
+async function setFocusEmulation(tabId, enabled) {
+  await chrome.debugger.sendCommand(attachTarget(tabId), "Emulation.setFocusEmulationEnabled", {
+    enabled: Boolean(enabled),
+  });
+}
+
+function getForegroundMaskState(tabId) {
+  const state = foregroundMaskStates.get(tabId);
+  return {
+    enabled: Boolean(state?.enabled),
+    config: state?.config || null,
+    appliedAt: state?.appliedAt || null,
+    scriptId: state?.scriptId || null,
+  };
+}
+
+async function enableForegroundMask(tabId, rawConfig) {
+  const config = normalizeForegroundMaskConfig(rawConfig);
+
+  await ensureDebuggerAttached(tabId);
+  await ensurePageEnabled(tabId);
+
+  const previous = foregroundMaskStates.get(tabId);
+  if (previous?.scriptId) {
+    try {
+      await chrome.debugger.sendCommand(attachTarget(tabId), "Page.removeScriptToEvaluateOnNewDocument", {
+        identifier: previous.scriptId,
+      });
+    } catch (e) {
+      // ignore cleanup errors
+    }
+  }
+
+  const source = buildForegroundMaskExpression(config, "install");
+  const addRes = await chrome.debugger.sendCommand(
+    attachTarget(tabId),
+    "Page.addScriptToEvaluateOnNewDocument",
+    { source }
+  );
+
+  const pageResult = await runInPageViaDebugger(tabId, source);
+  if (!pageResult?.ok) {
+    throw new Error(pageResult?.error || "Failed to enable foreground mask");
+  }
+
+  if (config.maskFocus) {
+    try {
+      await setFocusEmulation(tabId, true);
+    } catch (e) {
+      // ignore focus emulation failures
+    }
+  }
+
+  const nextState = {
+    enabled: true,
+    config,
+    scriptId: addRes?.identifier || null,
+    appliedAt: Date.now(),
+  };
+  foregroundMaskStates.set(tabId, nextState);
+  return nextState;
+}
+
+async function disableForegroundMask(tabId) {
+  const previous = foregroundMaskStates.get(tabId);
+  if (!previous) {
+    return {
+      enabled: false,
+      config: null,
+      appliedAt: null,
+      restoredCurrentDocument: false,
+    };
+  }
+
+  if (previous.scriptId) {
+    try {
+      await chrome.debugger.sendCommand(attachTarget(tabId), "Page.removeScriptToEvaluateOnNewDocument", {
+        identifier: previous.scriptId,
+      });
+    } catch (e) {
+      // ignore cleanup errors
+    }
+  }
+
+  let restoredCurrentDocument = false;
+  try {
+    await ensureDebuggerAttached(tabId);
+    const result = await runInPageViaDebugger(tabId, buildForegroundMaskExpression(previous.config, "uninstall"));
+    restoredCurrentDocument = Boolean(result?.ok);
+  } catch (e) {
+    restoredCurrentDocument = false;
+  }
+
+  if (previous.config?.maskFocus) {
+    try {
+      await setFocusEmulation(tabId, false);
+    } catch (e) {
+      // ignore focus emulation failures
+    }
+  }
+
+  foregroundMaskStates.delete(tabId);
+  return {
+    enabled: false,
+    config: null,
+    appliedAt: null,
+    restoredCurrentDocument,
+  };
 }
 
 async function runInPageViaDebugger(tabId, expression) {
@@ -530,7 +1001,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       action === "waitUrlMatch" ||
       action === "click" ||
       action === "input" ||
-      action === "inputKey";
+      action === "inputKey" ||
+      action === "enableForegroundMask" ||
+      action === "disableForegroundMask" ||
+      action === "getForegroundMaskState";
 
     const tabId = needsTab ? await getTabId(sender) : undefined;
 
@@ -539,6 +1013,24 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       const timeoutMs = Number.isFinite(msg.timeoutMs) ? msg.timeoutMs : 30000;
 
       const result = await waitForNetworkIdle(tabId, idleMs, timeoutMs);
+      sendResponse({ ok: true, tabId, ...result });
+      return;
+    }
+
+    if (action === "enableForegroundMask") {
+      const result = await enableForegroundMask(tabId, msg || {});
+      sendResponse({ ok: true, tabId, ...result });
+      return;
+    }
+
+    if (action === "disableForegroundMask") {
+      const result = await disableForegroundMask(tabId);
+      sendResponse({ ok: true, tabId, ...result });
+      return;
+    }
+
+    if (action === "getForegroundMaskState") {
+      const result = getForegroundMaskState(tabId);
       sendResponse({ ok: true, tabId, ...result });
       return;
     }

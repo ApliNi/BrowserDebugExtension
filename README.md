@@ -508,6 +508,121 @@ await send({
 
 ---
 
+### 10) `enableForegroundMask`
+
+启用“伪前台模式”，让页面里的部分 JS 检测更接近标签页仍在前台时的表现。
+
+参数：
+
+- `maskVisibility?: boolean` 默认 `true`，伪装 `document.hidden` / `document.visibilityState`
+- `maskFocus?: boolean` 默认 `true`，伪装 `document.hasFocus()`，并尽力启用 CDP 焦点模拟
+- `maskEvents?: boolean` 默认 `true`，过滤 `visibilitychange` / `blur` 监听
+- `maskRAF?: boolean` 默认 `true`，为 `requestAnimationFrame` 提供降级 fallback
+
+成功返回示例：
+
+```js
+{
+  ok: true,
+  tabId: 123,
+  enabled: true,
+  config: {
+    maskVisibility: true,
+    maskFocus: true,
+    maskEvents: true,
+    maskRAF: true,
+  },
+  scriptId: '123.456',
+  appliedAt: 1712222222222,
+}
+```
+
+示例：
+
+```js
+await send({
+  action: 'enableForegroundMask',
+  maskVisibility: true,
+  maskFocus: true,
+  maskEvents: true,
+  maskRAF: true,
+});
+```
+
+说明：
+
+- 该能力继续复用现有 token 桥接，不新增新的页面全局入口
+- 会立即尝试补当前文档，并对后续新文档自动继续注入
+- 这是“伪前台模式”，不是浏览器内核级真正前台
+- 无法保证解除 Chrome 对后台标签页的所有节流策略
+
+---
+
+### 11) `disableForegroundMask`
+
+关闭“伪前台模式”。
+
+成功返回示例：
+
+```js
+{
+  ok: true,
+  tabId: 123,
+  enabled: false,
+  restoredCurrentDocument: true,
+}
+```
+
+示例：
+
+```js
+await send({
+  action: 'disableForegroundMask',
+});
+```
+
+说明：
+
+- 会停止后续新文档的自动注入
+- 会尽力恢复当前文档，但不保证撤销所有已经发生过的副作用
+- 如果目标页面行为复杂，最稳妥的完全恢复方式仍然是刷新页面
+
+---
+
+### 12) `getForegroundMaskState`
+
+读取当前 tab 的“伪前台模式”状态。
+
+返回示例：
+
+```js
+{
+  ok: true,
+  tabId: 123,
+  enabled: true,
+  config: {
+    maskVisibility: true,
+    maskFocus: true,
+    maskEvents: true,
+    maskRAF: true,
+  },
+  appliedAt: 1712222222222,
+  scriptId: '123.456',
+}
+```
+
+示例：
+
+```js
+const maskState = await send({
+  action: 'getForegroundMaskState',
+});
+
+console.log(maskState);
+```
+
+---
+
 ## 常见组合示例
 
 ### 示例 1：Google 登录流程
@@ -581,12 +696,48 @@ console.log(config.value);
 await send({ action: 'kvDel', key: 'siteMode' });
 ```
 
+### 示例 5：先启用伪前台，再执行页面逻辑
+
+```js
+await send({
+  action: 'enableForegroundMask',
+  maskVisibility: true,
+  maskFocus: true,
+  maskEvents: true,
+  maskRAF: true,
+});
+
+await send({
+  action: 'click',
+  selector: 'button',
+  selectorText: '开始',
+});
+
+const state = await send({ action: 'getForegroundMaskState' });
+console.log(state.enabled);
+```
+
 ## 适用场景
 
 - userscript 借助扩展能力执行受控自动化
 - 登录流、按钮流、表单流自动化
 - 等待页面稳定后继续执行下一步
 - 用扩展存储为脚本保存少量字符串配置
+- 对只依赖基础可见性/焦点检测的页面做“伪前台”兼容
+
+## 伪前台模式的边界
+
+- 能伪装的主要是页面 JS 可直接读取到的部分信号，例如：
+  - `document.hidden`
+  - `document.visibilityState`
+  - `document.hasFocus()`
+  - `visibilitychange` / `blur` 的部分监听
+  - `requestAnimationFrame` 的降级 fallback
+- 不能保证的包括：
+  - 浏览器后台标签页的所有计时器节流都被解除
+  - 页面真实渲染时序完全等价于前台
+  - 所有站点或复杂框架都无法识别后台状态
+  - 已经发生过的页面副作用可以被完整回滚
 
 ---
 
