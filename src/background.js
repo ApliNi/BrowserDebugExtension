@@ -67,6 +67,100 @@ async function getTabId(sender) {
   return tab.id;
 }
 
+async function getSenderActiveTab(sender, inactiveMessage = "Sender tab is not the active tab in its window.") {
+  const senderTab = sender?.tab;
+  if (!senderTab || !Number.isInteger(senderTab.id)) {
+    throw new Error("captureVisibleTab requires a sender.tab request from a tab.");
+  }
+
+  if (!Number.isInteger(senderTab.windowId)) {
+    throw new Error("captureVisibleTab requires sender.tab.windowId.");
+  }
+
+  let currentTab;
+  try {
+    currentTab = await chrome.tabs.get(senderTab.id);
+  } catch (error) {
+    throw new Error(`Sender tab not found: ${error?.message || error}`);
+  }
+
+  if (!currentTab || currentTab.id !== senderTab.id) {
+    throw new Error("Sender tab not found.");
+  }
+
+  if (currentTab.windowId !== senderTab.windowId) {
+    throw new Error("Sender tab window mismatch.");
+  }
+
+  if (currentTab.active !== true) {
+    throw new Error(inactiveMessage);
+  }
+
+  const activeTabs = await chrome.tabs.query({ active: true, windowId: senderTab.windowId });
+  const activeTab = activeTabs?.[0];
+  if (!activeTab || activeTab.id !== senderTab.id) {
+    throw new Error(inactiveMessage);
+  }
+
+  return currentTab;
+}
+
+function normalizeCaptureOptions(msg) {
+  const format = msg?.format == null ? "png" : String(msg.format).toLowerCase();
+  if (format !== "png" && format !== "jpeg") {
+    throw new Error("Invalid capture format. Expected png or jpeg.");
+  }
+
+  const options = { format };
+  if (msg && Object.prototype.hasOwnProperty.call(msg, "quality")) {
+    if (format !== "jpeg") {
+      throw new Error("capture quality is only supported for jpeg format.");
+    }
+
+    if (!Number.isInteger(msg.quality) || msg.quality < 1 || msg.quality > 100) {
+      throw new Error("Invalid capture quality. Expected integer 1-100.");
+    }
+
+    options.quality = msg.quality;
+  }
+
+  return options;
+}
+
+function captureVisibleTab(windowId, options) {
+  return new Promise((resolve, reject) => {
+    chrome.tabs.captureVisibleTab(windowId, options, (dataUrl) => {
+      const err = chrome.runtime?.lastError;
+      if (err) {
+        reject(new Error(err.message || String(err)));
+        return;
+      }
+
+      if (typeof dataUrl !== "string" || !dataUrl) {
+        reject(new Error("captureVisibleTab failed: empty dataUrl returned."));
+        return;
+      }
+
+      resolve(dataUrl);
+    });
+  });
+}
+
+async function handleCaptureVisibleTab(msg, sender) {
+  if (msg && (Object.prototype.hasOwnProperty.call(msg, "tabId") || Object.prototype.hasOwnProperty.call(msg, "windowId"))) {
+    throw new Error("captureVisibleTab does not accept msg.tabId or msg.windowId; request must come from sender.tab.");
+  }
+
+  const tab = await getSenderActiveTab(sender);
+  const options = normalizeCaptureOptions(msg);
+  const dataUrl = await captureVisibleTab(tab.windowId, options);
+  await getSenderActiveTab(
+    sender,
+    "captureVisibleTab discarded: sender tab is no longer the active tab in its window after capture."
+  );
+  return { tabId: tab.id, windowId: tab.windowId, format: options.format, dataUrl };
+}
+
 function attachTarget(tabId) {
   return { tabId };
 }
@@ -1007,6 +1101,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       action === "getForegroundMaskState";
 
     const tabId = needsTab ? await getTabId(sender) : undefined;
+
+    if (action === "captureVisibleTab") {
+      const result = await handleCaptureVisibleTab(msg, sender);
+      sendResponse({ ok: true, ...result });
+      return;
+    }
 
     if (action === "waitNetworkIdle") {
       const idleMs = Number.isFinite(msg.idleMs) ? msg.idleMs : 1000;

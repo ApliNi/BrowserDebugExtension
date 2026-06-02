@@ -11,6 +11,7 @@
 - 等待 URL 匹配
 - 等待网络空闲
 - 读写扩展存储
+- 截取当前调用页面所在 active tab 的可见网页区域
 
 项目内已包含一个 `test.user.js` 示例，演示如何从 userscript 通过桥接调用扩展能力完成自动化登录和页面操作。
 
@@ -22,6 +23,7 @@
 - 默认自动生成 32 位随机字符串 token
 - 支持普通 DOM 点击、输入、逐键输入、等待类操作
 - 支持 `chrome.storage.local` / `chrome.storage.sync` 的字符串读写
+- 默认支持截取当前调用页面所在 active tab 的可见网页区域
 
 ## 安装扩展
 
@@ -623,6 +625,69 @@ console.log(maskState);
 
 ---
 
+### 13) `captureVisibleTab`
+
+截取当前调用页面所在 active tab 的可见网页区域。
+
+它截取的是当前标签页视口内实际可见的网页内容，不是：
+
+- 整个网页全页截图
+- 浏览器窗口 UI 截图
+- 桌面截图
+- 其他标签页截图
+
+`captureVisibleTab` 默认可用，无需额外设置。
+
+参数：
+
+- `format?: 'png' | 'jpeg'` 默认 `png`
+- `quality?: number` 取值 `1` 到 `100`，仅 `format: 'jpeg'` 时可用
+
+返回示例：
+
+```js
+{
+  ok: true,
+  tabId: 123,
+  windowId: 456,
+  format: 'png',
+  dataUrl: 'data:image/png;base64,...'
+}
+```
+
+示例 1：截取 PNG
+
+```js
+const shot = await send({
+  action: 'captureVisibleTab',
+});
+
+console.log(shot.dataUrl);
+```
+
+示例 2：截取 JPEG 并指定质量
+
+```js
+const shot = await send({
+  action: 'captureVisibleTab',
+  format: 'jpeg',
+  quality: 80,
+});
+
+console.log(shot.dataUrl);
+```
+
+限制与安全注意事项：
+
+- 只截取当前调用页面所在的 active tab 可见网页区域，不能用于全页截图
+- 不包含浏览器地址栏、工具栏、扩展弹窗、系统窗口或桌面内容
+- 如果页面未处于可截图状态、权限不足，或截图过程中切换了该窗口的 active tab，会抛出异常
+- 返回值是 `dataUrl`，可能较大，调用方应避免无必要地持久化或外传
+- 截图可能包含账号、验证码、个人资料等敏感信息，请只在可信页面和可信脚本中使用
+- token 泄露会扩大截图能力的滥用风险，请妥善保管并定期更换
+
+---
+
 ## 常见组合示例
 
 ### 示例 1：Google 登录流程
@@ -724,6 +789,7 @@ console.log(state.enabled);
 - 等待页面稳定后继续执行下一步
 - 用扩展存储为脚本保存少量字符串配置
 - 对只依赖基础可见性/焦点检测的页面做“伪前台”兼容
+- 获取当前可见网页区域截图用于调试或记录
 
 ## 伪前台模式的边界
 
