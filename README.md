@@ -5,6 +5,7 @@
 它把扩展能力暴露给页面环境和 userscript，用一个可配置 token 作为桥接通道名，从而在页面里安全调用这些能力：
 
 - 查找并点击元素
+- 获取元素视口坐标并用 Chrome Debugger 坐标点击
 - 填充输入框
 - 逐键输入
 - 等待元素出现
@@ -12,6 +13,7 @@
 - 等待网络空闲
 - 读写扩展存储
 - 截取当前调用页面所在 active tab 的可见网页区域
+- 清理指定 URL 或域名下的 Cookie
 
 项目内已包含一个 `test.user.js` 示例，演示如何从 userscript 通过桥接调用扩展能力完成自动化登录和页面操作。
 
@@ -21,9 +23,10 @@
 - content script 与页面脚本双桥接
 - token 可在扩展设置页中修改
 - 默认自动生成 32 位随机字符串 token
-- 支持普通 DOM 点击、输入、逐键输入、等待类操作
+- 支持普通 DOM 点击、坐标点击、输入、逐键输入、等待类操作
 - 支持 `chrome.storage.local` / `chrome.storage.sync` 的字符串读写
 - 默认支持截取当前调用页面所在 active tab 的可见网页区域
+- 支持按 URL、域名、名称清理 Cookie
 
 ## 安装扩展
 
@@ -114,7 +117,7 @@ userscript 示例：
 
 - `Bridge access token is required`
 - `Bridge access token mismatch`
-- `Missing msg.action`
+- `Missing msg.action or msg.type`
 - `Missing msg.selector`
 - `Missing msg.pattern`
 - `Target is not editable`
@@ -123,7 +126,7 @@ userscript 示例：
 
 ## 所有功能与示例
 
-下面按 `action` 分类列出所有可调用能力。
+下面按 `action` 分类列出所有可调用能力。兼容只传 `type` 的调用；如果 `action` 与 `type` 同时存在，优先使用 `action`。
 
 ---
 
@@ -173,15 +176,49 @@ await send({
 
 ---
 
-### 2) `input`
+### 2) `clickElementCoordinates`
 
-直接给输入框或可编辑节点赋值，并触发 `input` / `change` 事件。
+按 `click` 相同规则定位元素，但底层会先获取元素在当前视口内的可点击坐标，再通过 Chrome Debugger 坐标点击。需要把普通 DOM 点击替换为真实坐标点击时，通常只要把原来的 `action: 'click'` 改成 `action: 'clickElementCoordinates'` 或 `type: 'clickElementCoordinates'`。
+
+参数沿用 `click`：
+
+- `selector: string | string[]` 必填
+- `selectorText: string | string[]` 可选
+- `waitElement?: boolean` 默认 `true`
+- `intervalMs?: number` 默认 `200`
+- `timeoutMs?: number` 默认 `30000`
+- `waitAfterFoundMs?: number` 默认 `100`
+- `button?: 'left' | 'middle' | 'right'` 默认 `left`
+- `clickCount?: number` 正整数，默认 `1`
+
+示例：由 `click` 替换为坐标点击
+
+```js
+await send({
+  action: 'clickElementCoordinates',
+  selector: 'button',
+  selectorText: '登录',
+  button: 'right',
+});
+```
+
+---
+
+### 3) `input`
+
+直接给输入框、文本域、可编辑节点或下拉选择框赋值，并触发 `input` / `change` 事件。
+
+支持元素类型：`input`、`textarea`、`contenteditable`、`select`。
+
+`select` 匹配规则：优先按 `option.value` 精确匹配，其次按显示文本精确匹配（包含 `label` / `text`，会去除首尾空白）。找不到匹配项会失败；通过 `send()` 调用时会抛出异常。
+
+`select multiple` 支持多选：`value` 传数组时选择多个选项，传字符串时选择单个选项；任一项找不到都会失败。单选 `select` 应传字符串，数组仅建议用于 `select multiple`。
 
 参数：
 
 - `selector: string | string[]` 必填
 - `selectorText: string | string[]` 可选
-- `value?: string`
+- `value?: string | string[]`
 - `waitElement?: boolean`
 - `intervalMs?: number`
 - `timeoutMs?: number`
@@ -218,15 +255,147 @@ await send({
 });
 ```
 
+示例 4：选择单选 select
+
+```js
+await send({
+  action: 'input',
+  selector: 'select[name="country"]',
+  value: 'CN',
+});
+```
+
+示例 5：选择多选 select
+
+```js
+await send({
+  action: 'input',
+  selector: 'select[multiple]',
+  value: ['frontend', 'backend'],
+});
+```
+
 ---
 
-### 3) `inputKey`
+### 4) `getElementCoordinates`
 
-先聚焦目标元素，再通过 debugger 模拟逐键输入，更接近真实键盘输入。
+按现有 `selector` / `selectorText` 规则定位元素，滚动到视口中间，并返回元素在当前视口内的 CSS 像素坐标。顶层 `x` / `y` 会尽量取元素矩形与视口交集区域的中心点，确保坐标落在视口内，可直接作为 `clickCoordinates` 的输入；同时返回 `coordinates`、`rect`、`viewport` 和可直接点击的 `click` 对象。
 
 参数：
 
 - `selector: string | string[]` 必填
+- `selectorText: string | string[]` 可选
+- `waitElement?: boolean` 默认 `true`
+- `intervalMs?: number` 默认 `200`
+- `timeoutMs?: number` 默认 `30000`
+- `waitAfterFoundMs?: number` 默认 `100`
+
+成功返回示例：
+
+```js
+{
+  ok: true,
+  tabId: 123,
+  attempts: 1,
+  action: 'clickCoordinates',
+  x: 320.5,
+  y: 240,
+  coordinates: { x: 320.5, y: 240 },
+  rect: { left: 280, top: 220, right: 361, bottom: 260, width: 81, height: 40, x: 280, y: 220 },
+  viewport: { width: 1280, height: 720, devicePixelRatio: 1, scrollX: 0, scrollY: 500 },
+  click: { action: 'clickCoordinates', type: 'clickCoordinates', x: 320.5, y: 240 }
+}
+```
+
+示例 1：获取按钮中心点
+
+```js
+const pos = await send({
+  action: 'getElementCoordinates',
+  selector: 'button',
+  selectorText: '提交',
+});
+
+console.log(pos.x, pos.y);
+```
+
+示例 2：获取后直接真实鼠标点击
+
+```js
+const pos = await send({
+  action: 'getElementCoordinates',
+  selector: 'button',
+  selectorText: '提交',
+});
+
+await send({ type: 'clickCoordinates', ...pos, button: 'right' });
+```
+
+---
+
+### 5) `clickCoordinates`
+
+使用 Chrome Debugger `Input.dispatchMouseEvent` 按视口 CSS 像素坐标模拟真实鼠标点击。事件序列包含 `mouseMoved`、`mousePressed`、`mouseReleased`。额外字段会被忽略，因此可接收 `getElementCoordinates` 的顶层 `x` / `y` 或 `coordinates.x` / `coordinates.y`。
+
+参数：
+
+- `x: number` 与 `y: number`，或 `coordinates: { x: number, y: number }`
+- `button?: 'left' | 'middle' | 'right'` 默认 `left`
+- `clickCount?: number` 正整数，默认 `1`
+
+示例 1：点击指定坐标
+
+```js
+await send({
+  action: 'clickCoordinates',
+  x: 320.5,
+  y: 240,
+});
+```
+
+也可以用 `type` 调用，适合直接展开 `getElementCoordinates` 的返回值：
+
+```js
+const pos = await send({ action: 'getElementCoordinates', selector: 'button' });
+await send({ type: 'clickCoordinates', ...pos, button: 'right' });
+```
+
+示例 2：用 `coordinates` 点击
+
+```js
+await send({
+  action: 'clickCoordinates',
+  coordinates: { x: 320.5, y: 240 },
+});
+```
+
+示例 3：右键或双击
+
+```js
+await send({
+  action: 'clickCoordinates',
+  x: 320.5,
+  y: 240,
+  button: 'right',
+});
+
+await send({
+  action: 'clickCoordinates',
+  x: 320.5,
+  y: 240,
+  clickCount: 2,
+});
+```
+
+---
+
+### 6) `inputKey`
+
+有非空 `selector` 时，默认先定位/等待/聚焦目标元素，再通过 debugger 模拟逐键输入，更接近真实键盘输入。无 `selector`、`selector: null`、空字符串或空数组时，不聚焦任何元素，直接向当前页面已有焦点/活动上下文输入。`select` 推荐使用 `action: 'input'` 直接选择选项，而不是逐键输入。
+
+参数：
+
+- `selector?: string | string[]`
 - `selectorText: string | string[]` 可选
 - `value?: string`
 - `waitElement?: boolean`
@@ -266,9 +435,65 @@ await send({
 });
 ```
 
+示例 4：无 selector，直接向当前焦点输入
+
+```js
+await send({
+  action: 'inputKey',
+  value: 'type into active field',
+});
+```
+
+`selector: null` 也会按无 selector 处理：
+
+```js
+await send({
+  action: 'inputKey',
+  selector: null,
+  value: 'type into active field',
+});
+```
+
 ---
 
-### 4) `waitForElement`
+### 7) `pasteInput`
+
+使用 Chrome Debugger `Input.insertText` 一次性插入文本，适合长文本输入或模拟粘贴。与 `inputKey` 的区别：`inputKey` 会逐键派发键盘事件，可配置每个字符延迟；`pasteInput` 不逐字符输入，而是把整段文本一次性插入到当前焦点/目标元素中。不会通过 DOM 直接改值。
+
+聚焦规则与 `inputKey` 一致：有非空 `selector` 时，先按现有 `selector` / `selectorText` 逻辑等待并聚焦目标元素，然后插入文本；无 `selector`、`selector: null`、空字符串或空数组时，不聚焦任何元素，直接向当前页面已有焦点/活动上下文插入。
+
+参数：
+
+- `selector?: string | string[]`
+- `selectorText?: string | string[]`
+- `value?: string`
+- `waitElement?: boolean`
+- `intervalMs?: number`
+- `timeoutMs?: number`
+- `waitAfterFoundMs?: number`
+
+示例 1：定位 textarea 后一次性插入长文本
+
+```js
+await send({
+  action: 'pasteInput',
+  selector: 'textarea[name="message"]',
+  value: '这是一段较长文本\n会一次性插入到目标输入框。',
+});
+```
+
+示例 2：无 selector，直接插入到当前焦点
+
+```js
+await send({
+  action: 'pasteInput',
+  value: 'paste into active field',
+});
+```
+
+---
+
+### 8) `waitForElement`
 
 等待元素出现，并可额外校验元素文本是否匹配。
 
@@ -322,7 +547,7 @@ await send({
 
 ---
 
-### 5) `waitUrlMatch`
+### 9) `waitUrlMatch`
 
 轮询当前 tab URL，直到匹配指定正则。
 
@@ -374,7 +599,7 @@ await send({
 
 ---
 
-### 6) `waitNetworkIdle`
+### 10) `waitNetworkIdle`
 
 等待页面网络请求进入空闲状态。
 
@@ -421,7 +646,7 @@ await send({ action: 'waitNetworkIdle', idleMs: 1500 });
 
 ---
 
-### 7) `kvGet`
+### 11) `kvGet`
 
 读取扩展存储中的字符串。
 
@@ -455,7 +680,7 @@ console.log(res.value);
 
 ---
 
-### 8) `kvSet`
+### 12) `kvSet`
 
 写入扩展存储中的字符串。
 
@@ -489,7 +714,7 @@ await send({
 
 ---
 
-### 9) `kvDel`
+### 13) `kvDel`
 
 删除扩展存储中的键。
 
@@ -510,7 +735,7 @@ await send({
 
 ---
 
-### 10) `enableForegroundMask`
+### 14) `enableForegroundMask`
 
 启用“伪前台模式”，让页面里的部分 JS 检测更接近标签页仍在前台时的表现。
 
@@ -560,7 +785,7 @@ await send({
 
 ---
 
-### 11) `disableForegroundMask`
+### 15) `disableForegroundMask`
 
 关闭“伪前台模式”。
 
@@ -591,7 +816,7 @@ await send({
 
 ---
 
-### 12) `getForegroundMaskState`
+### 16) `getForegroundMaskState`
 
 读取当前 tab 的“伪前台模式”状态。
 
@@ -625,7 +850,7 @@ console.log(maskState);
 
 ---
 
-### 13) `captureVisibleTab`
+### 17) `captureVisibleTab`
 
 截取当前调用页面所在 active tab 的可见网页区域。
 
@@ -685,6 +910,63 @@ console.log(shot.dataUrl);
 - 返回值是 `dataUrl`，可能较大，调用方应避免无必要地持久化或外传
 - 截图可能包含账号、验证码、个人资料等敏感信息，请只在可信页面和可信脚本中使用
 - token 泄露会扩大截图能力的滥用风险，请妥善保管并定期更换
+
+---
+
+### 18) `clearCookies`
+
+清理指定 `url` 或 `domain` 的 Cookie。
+
+参数：
+
+- `url?: string`
+- `domain?: string | string[]`
+- `names?: string[]`
+- `storeId?: string`
+
+说明：
+
+- `url` 和 `domain` 至少传一个
+- 只传 `url` 时，按该 URL 查询并删除匹配 Cookie
+- 只传 `domain` 时，按该域名匹配并删除 Cookie；`domain` 传数组时可一次清理多个域名
+- `domain` 数组必须非空，且每一项都必须是非空字符串
+- `url` 和 `domain` 都传时，以 `url` 查询 Cookie，并用 `domain` 额外过滤；当 `domain` 是数组时，匹配任意一个域名即可
+- `url` 仅支持 `http` / `https`
+- `domain` 不做 eTLD+1 推导；传入什么域名就按该域名匹配，不会自动扩展到顶级可注册域
+- `names` 可选；传入后只删除名称在列表内的 Cookie
+- `storeId` 可选；用于指定 Cookie store
+- 可以删除 HttpOnly Cookie
+- 只清理 Cookie，不会清理 `localStorage` / `sessionStorage` / `IndexedDB`
+- 这是高风险操作，会影响登录态；请只在明确目标范围内使用，不使用全局清理
+- 返回结果会包含 `removed`、`failed`、`cookies`、`failures`；`ok: true` 不代表每个 Cookie 都删除成功，需关注 `failed` 和 `failures`
+
+示例 1：按 URL 清理 Cookie
+
+```js
+await send({
+  action: 'clearCookies',
+  url: 'https://example.com/account',
+});
+```
+
+示例 2：按多个 domain 清理 Cookie
+
+```js
+await send({
+  action: 'clearCookies',
+  domain: ['example.com', 'accounts.example.com'],
+});
+```
+
+示例 3：按名称删除指定 Cookie
+
+```js
+await send({
+  action: 'clearCookies',
+  url: 'https://example.com/',
+  names: ['sid', 'session'],
+});
+```
 
 ---
 
@@ -785,11 +1067,12 @@ console.log(state.enabled);
 ## 适用场景
 
 - userscript 借助扩展能力执行受控自动化
-- 登录流、按钮流、表单流自动化
+- 登录流、按钮流、表单流自动化，支持填写 input、textarea、contenteditable 和 select
 - 等待页面稳定后继续执行下一步
 - 用扩展存储为脚本保存少量字符串配置
 - 对只依赖基础可见性/焦点检测的页面做“伪前台”兼容
 - 获取当前可见网页区域截图用于调试或记录
+- 在明确目标范围内清理 Cookie，用于重置登录态或调试会话状态
 
 ## 伪前台模式的边界
 

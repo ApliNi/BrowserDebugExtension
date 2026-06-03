@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "# BrowserDebugExtension",
   "version": "1.0",
-  "permissions": ["debugger", "tabs", "activeTab", "storage"],
+  "permissions": ["debugger", "tabs", "activeTab", "storage", "cookies"],
   "host_permissions": ["<all_urls>"],
   "options_page": "options.html",
   "background": { "service_worker": "background.js" },
