@@ -68,6 +68,30 @@
     }));
   }
 
+  function emitDebugEventDelivery(message) {
+    if (!activeToken) {
+      return { ok: false, handled: false, error: "Bridge token is not initialized." };
+    }
+
+    const ack = { handled: false };
+    bridgeTarget.dispatchEvent(new CustomEvent(activeToken, {
+      detail: {
+        kind: "debug-event-delivery",
+        listenerId: message.listenerId,
+        name: message.name,
+        data: message.data,
+        ack,
+      },
+    }));
+
+    return {
+      ok: ack.handled === true,
+      handled: ack.handled === true,
+      error: ack.error,
+      callbackError: ack.callbackError,
+    };
+  }
+
   function bindBridgeListener(token) {
     if (!token || token === activeToken) {
       return;
@@ -131,6 +155,15 @@
     ensureToken().catch((error) => {
       console.error("Failed to regenerate bridge token", error);
     });
+  });
+
+  chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+    if (message?.kind !== "debug-event-delivery") {
+      return false;
+    }
+
+    sendResponse(emitDebugEventDelivery(message));
+    return false;
   });
 
   ensureToken().catch((error) => {

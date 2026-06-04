@@ -49,8 +49,22 @@
         padding: 24px;
       }
 
+      .panel + .panel {
+        margin-top: 18px;
+      }
+
+      .panel__title {
+        margin: 0 0 18px;
+        font-size: 16px;
+        font-weight: 600;
+      }
+
       .field {
         display: block;
+      }
+
+      .field + .field {
+        margin-top: 18px;
       }
 
       .field__label {
@@ -78,6 +92,12 @@
 
       .field__input::placeholder {
         color: #8a8a84;
+      }
+
+      .field__textarea {
+        min-height: 112px;
+        padding: 10px 12px;
+        resize: vertical;
       }
 
       .field__hint {
@@ -138,24 +158,43 @@
   <body>
     <main class="page">
       <header class="page__header">
-        <h1 class="page__title">Bridge Token</h1>
-        <p class="page__desc">用于页面桥接鉴权，仅保存在当前浏览器本地。</p>
+        <h1 class="page__title">扩展设置</h1>
+        <p class="page__desc">配置页面桥接鉴权与浏览器启动后的自动打开网页。</p>
       </header>
 
-      <section class="panel">
+      <section id="token-panel" class="panel">
+        <h2 class="panel__title">Token</h2>
+
         <label class="field" for="token-input">
           <span class="field__label">Access Token</span>
           <input id="token-input" class="field__input" type="text" spellcheck="false" autocomplete="off" placeholder="请输入 token">
         </label>
 
-        <p class="field__hint">默认自动生成 32 位字符串，修改后立即生效。</p>
+        <p class="field__hint">Token 默认自动生成 32 位字符串，用于页面桥接鉴权。</p>
 
         <div class="actions">
-          <button id="save-button" class="button button--primary" type="button">保存</button>
+          <button id="save-token-button" class="button button--primary" type="button">保存 Token</button>
           <button id="regen-button" class="button" type="button">重新生成</button>
         </div>
 
-        <p id="status" class="status" aria-live="polite"></p>
+        <p id="token-status" class="status" aria-live="polite"></p>
+      </section>
+
+      <section id="startup-url-panel" class="panel">
+        <h2 class="panel__title">启动打开 URL</h2>
+
+        <label class="field" for="startup-url-input">
+          <span class="field__label">启动打开 URL</span>
+          <textarea id="startup-url-input" class="field__input field__textarea" spellcheck="false" autocomplete="off" placeholder="https://example.com&#10;https://example.org"></textarea>
+        </label>
+
+        <p class="field__hint">URL 可为空；每行一个 URL，非空行必须包含 http:// 或 https://。</p>
+
+        <div class="actions">
+          <button id="save-startup-url-button" class="button button--primary" type="button">保存启动 URL</button>
+        </div>
+
+        <p id="startup-url-status" class="status" aria-live="polite"></p>
       </section>
     </main>
 
