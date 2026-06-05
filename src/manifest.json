@@ -2,6 +2,7 @@
   "manifest_version": 3,
   "name": "# BrowserDebugExtension",
   "version": "1.0",
+  "incognito": "split",
   "message_serialization": "structured_clone",
   "permissions": ["debugger", "tabs", "activeTab", "storage", "cookies", "browsingData"],
   "host_permissions": ["<all_urls>"],

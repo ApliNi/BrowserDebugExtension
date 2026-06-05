@@ -213,9 +213,9 @@ await chrome.storage.local.set({
 
 ### 标签页.打开新标签页 `openTab`
 
-> Chrome Debugger、CDP Target.createTarget、前台/后台打开
+> Chrome Debugger、CDP Target.createTarget、隐身窗口、前台/后台打开
 
-通过已附加到当前 tab 的 Chrome Debugger 会话调用 Chrome DevTools Protocol `Target.createTarget` 打开新标签页。该功能不是页面脚本 `window.open()`，也不是后台 `chrome.tabs.create()`；`focus` 用于控制新标签页是否前台打开。
+默认通过已附加到当前 tab 的 Chrome Debugger 会话调用 Chrome DevTools Protocol `Target.createTarget` 打开新标签页。该功能不是页面脚本 `window.open()`；`focus` 用于控制新标签页是否前台打开。传入 `incognito: true` 时改为使用 `chrome.windows.create({ url, incognito: true, focused: focus })` 打开隐身窗口。
 
 相关/关联功能描述。
 - 桥接.初始化
@@ -229,7 +229,8 @@ await chrome.storage.local.set({
 	"action": "openTab",
 	"type": "openTab",
 	"url": "https://example.com/dashboard",
-	"focus": false
+	"focus": false,
+	"incognito": false
 }
 ```
 
@@ -242,6 +243,19 @@ await chrome.storage.local.set({
 	"sourceTabId": 123,
 	"targetId": "ABCDEF1234567890",
 	"createdTabId": 456
+}
+```
+
+隐身模式打开时返回：
+
+```json
+{
+	"ok": true,
+	"incognito": true,
+	"windowId": 789,
+	"tabId": 123,
+	"createdTabId": 456,
+	"sourceTabId": 123
 }
 ```
 
@@ -261,16 +275,28 @@ await debug({
 	url: 'https://example.com/dashboard',
 	focus: true,
 });
+
+// 打开隐身窗口。需要在扩展详情页启用“允许在隐身模式下运行”。
+await debug({
+	action: 'openTab',
+	url: 'https://example.com/dashboard',
+	incognito: true,
+	focus: true,
+});
 ```
 
 #### 注意事项
 
 - `url` 必填，且只允许合法 `http://` 或 `https://` 地址。
 - `focus` 可省略，默认 `true`；传入时必须是布尔值。`focus: false` 会以 `Target.createTarget({ background: true })` 后台创建目标，通常不会切换到新标签页。
-- 该 action 需要当前/发送方 tab 作为调试命令发起目标；后台会先确保该 tab 已通过 `chrome.debugger.attach` 附加，再发送 `Target.createTarget`。
-- 输出中的 `tabId` 与 `sourceTabId` 都表示发起 CDP 命令的当前/发送方 tab，不是新打开的标签页 ID。
-- 返回的 `targetId` 是 CDP Target ID，不是 Chrome Extensions 的 `tabs.Tab.id`。后台会尽力通过 `chrome.debugger.getTargets()` 关联 `createdTabId`；如果浏览器未及时暴露关联信息，`createdTabId` 可能为 `null`，但不会影响新标签页创建结果。
-- 打开新标签页依赖现有 `debugger` 权限，不需要新增 manifest 权限。
+- `incognito` 可省略，默认 `false`；传入时必须是布尔值。
+- 普通打开（`incognito` 为 `false`）需要当前/发送方 tab 作为调试命令发起目标；后台会先确保该 tab 已通过 `chrome.debugger.attach` 附加，再发送 `Target.createTarget`。
+- 普通打开输出中的 `tabId` 与 `sourceTabId` 都表示发起 CDP 命令的当前/发送方 tab，不是新打开的标签页 ID。
+- 普通打开返回的 `targetId` 是 CDP Target ID，不是 Chrome Extensions 的 `tabs.Tab.id`。后台会尽力通过 `chrome.debugger.getTargets()` 关联 `createdTabId`；如果浏览器未及时暴露关联信息，`createdTabId` 可能为 `null`，但不会影响新标签页创建结果。
+- 隐身模式打开前会调用 `chrome.extension.isAllowedIncognitoAccess()` 检测用户授权状态；必须在扩展详情页开启“允许在隐身模式下运行”，否则会显式抛错。
+- manifest 中的 `incognito: "split"` 不是授权开关，只声明用户允许隐身运行后普通与隐身使用相互隔离的扩展实例；只要没有设置 `incognito: "not_allowed"`，真正能否使用隐身能力仍由用户授权决定。
+- 隐身模式打开输出包含 `incognito: true`、`windowId`、`createdTabId`（如果 Chrome 返回了新窗口内标签页信息）和 `sourceTabId`。`tabId` 与 `sourceTabId` 始终表示发起请求的当前/发送方 tab，`createdTabId` 表示新隐身窗口中的标签页 ID。
+- 打开普通新标签页依赖现有 `debugger` 权限；打开隐身窗口使用 `chrome.windows.create`，当前扩展已有 `tabs` 权限，可读取返回窗口内标签页信息，不需要新增其他 manifest 权限。
 
 
 
@@ -1720,7 +1746,7 @@ await debug({
 
 > 域名范围、http/https origin、Cookie 与打开标签发现、残留数据清理
 
-清理一个或多个域名对应的网站数据。输入支持 `domain` 或 `domains`，值可以是字符串或字符串数组；只传 `aaa.com` 时，扩展会自动补充 `http://aaa.com` 与 `https://aaa.com` origin。后台会通过 `chrome.cookies.getAll({ domain })` 查找匹配 Cookie，从 `cookie.domain` 提取 host，识别输入域名及其子域，并为这些 host 继续补充 `http://host` 与 `https://host` origins。同时会通过 `chrome.tabs.query({})` 查找当前打开的 `http/https` 页面，若页面 host 匹配输入域名或其子域，则把该页面真实 `URL.origin` 加入 origins，因此可覆盖带端口 origin，例如 `https://api.aaa.com:8443`。
+清理一个或多个域名对应的网站数据。扩展使用 manifest `incognito: "split"`，普通窗口与隐身窗口分别运行在对应 profile 中；`clearSiteData` 只信任调用来源的 `sender.tab.incognito` 判断当前 profile，不接受消息体中的 `incognito` 参数。输入支持 `domain` 或 `domains`，值可以是字符串或字符串数组；只传 `aaa.com` 时，扩展会自动补充 `http://aaa.com` 与 `https://aaa.com` origin。后台会通过 `chrome.cookies.getAll({ domain })` 查找匹配 Cookie，从 `cookie.domain` 提取 host，识别输入域名及其子域，并为这些 host 继续补充 `http://host` 与 `https://host` origins。同时会通过 `chrome.tabs.query({})` 查找当前打开的 `http/https` 页面，若页面 host 匹配输入域名或其子域，且 tab 的 `incognito` 与调用来源 profile 一致，则把该页面真实 `URL.origin` 加入 origins，因此可覆盖带端口 origin，例如 `https://api.aaa.com:8443`。
 
 执行顺序为：先规范化 domains；通过 Cookie 与打开 tabs 发现 hosts/origins；对匹配 tabs 尝试用 debugger 在页面上下文执行 `sessionStorage.clear()` 与 `localStorage.clear()`；如果存在匹配 tab，再通过 Chrome DevTools Protocol 的 `Storage.clearDataForOrigin` 对已发现 origins 额外执行一层 `storageTypes: "all"` 清理；再使用 `chrome.browsingData.remove` 清理 `cache`、`cacheStorage`、`cookies`、`fileSystems`、`indexedDB`、`localStorage`、`serviceWorkers`、`webSQL`；最后重新查询目标 domains 的剩余 Cookie，并通过 Cookies API 逐个删除，尽量处理 `storeId`、`partitionKey` 等 Cookie 维度；默认以 `bypassCache: true` 重载匹配 tabs，避免旧运行态继续写回。不会使用 `chrome.storage` 清理网站数据，也不会清理扩展自身 storage。
 
@@ -1751,7 +1777,7 @@ await debug({
 	"originSources": [
 		{ "source": "domain", "domain": "aaa.com", "origins": ["http://aaa.com", "https://aaa.com"] },
 		{ "source": "cookie", "host": "api.aaa.com", "origins": ["http://api.aaa.com", "https://api.aaa.com"] },
-		{ "source": "tab", "tabId": 123, "url": "https://api.aaa.com:8443/app", "origin": "https://api.aaa.com:8443" }
+		{ "source": "tab", "tabId": 123, "url": "https://api.aaa.com:8443/app", "origin": "https://api.aaa.com:8443", "incognito": true }
 	],
 	"browsingData": {
 		"ok": true,
@@ -1761,6 +1787,8 @@ await debug({
 	"debuggerStorage": {
 		"attempted": 5,
 		"skipped": false,
+		"driverTabId": 123,
+		"driverIncognito": true,
 		"reason": null,
 		"cleared": 5,
 		"failures": []
@@ -1783,14 +1811,32 @@ await debug({
 		"debuggerDetached": [123],
 		"debuggerDetachFailures": [],
 		"items": [
-			{ "tabId": 123, "url": "https://api.aaa.com:8443/app", "origin": "https://api.aaa.com:8443" }
+			{ "tabId": 123, "url": "https://api.aaa.com:8443/app", "origin": "https://api.aaa.com:8443", "incognito": true }
 		]
 	},
 	"limitations": [
 		"Cookie domains and currently open tabs are used to discover subdomains. Unknown subdomains without matching cookies or open tabs cannot be enumerated by Chrome extension APIs.",
 		"Only http and https origins derived from the input domains, discovered cookie domains, and matching open tab URL origins are cleared.",
 		"Chrome extension APIs do not guarantee clearing HSTS, site permissions, media licenses, Shared Storage, Interest Groups, Storage Buckets, or other browser-internal site data. When a matching tab exists, Chrome DevTools Protocol Storage.clearDataForOrigin is also attempted as an extra best-effort cleanup layer."
-	]
+	],
+	"diagnostic": {
+		"manifestIncognito": "split",
+		"senderProfile": {
+			"senderTabId": 123,
+			"senderWindowId": 7,
+			"senderIncognito": true
+		},
+		"tabProfileFilter": {
+			"applied": true,
+			"incognito": true
+		},
+		"requestedOptions": {
+			"domains": ["aaa.com", "bbb.com"],
+			"storeId": null,
+			"reloadTabs": true,
+			"clearSessionStorage": true
+		}
+	}
 }
 ```
 
@@ -1815,10 +1861,11 @@ await debug({
 - 不允许单段 TLD 输入，例如 `com`。当前不内置 public suffix / 多租户域名 denylist，以保证调用方可以完整清理传入域名及通过 Cookie 发现的子域；调用方应只传入自己确实希望清理的域名范围。
 - `reloadTabs` 可选，默认 `true`；设为 `false` 时不重载匹配 tabs。重载失败会记录在 `tabs.reloadFailures`，不影响前面的 browsingData 与 Cookie 兜底删除。
 - `clearSessionStorage` 可选，默认 `true`；设为 `false` 时不尝试页面运行态 `sessionStorage.clear()` / `localStorage.clear()`。执行依赖 debugger attach，失败会记录在 `tabs.storageFailures`，不阻断主清理流程。
-- `debuggerStorage` 是额外的最佳努力清理层；只有存在匹配 tab 时才能通过 debugger 调用 `Storage.clearDataForOrigin`。没有匹配 tab 时会返回 `debuggerStorage.skipped: true` 和 `reason`，不记为失败。调用过程中临时 attach 的 debugger 会在清理结束后主动 detach，detach 失败记录在 `tabs.debuggerDetachFailures`。
+- 隐身模式使用 manifest `incognito: "split"`。后台只根据 Chrome 提供的 `sender.tab.incognito` 确定调用 profile，并在打开 tabs 发现、页面 storage 清理、debugger driver tab 与重载时过滤 `tab.incognito` 必须一致；无法获得 `sender.tab.incognito` 时会拒绝执行，避免跨普通/隐身 profile 清理运行态 tabs。
+- `debuggerStorage` 是额外的最佳努力清理层；只有存在匹配 tab 时才能通过 debugger 调用 `Storage.clearDataForOrigin`。没有匹配 tab 时会返回 `debuggerStorage.skipped: true`、`driverTabId: null`、`driverIncognito: null` 和 `reason`，不记为失败。调用过程中临时 attach 的 debugger 会在清理结束后主动 detach，detach 失败记录在 `tabs.debuggerDetachFailures`。
 - 自动补充 `http` 与 `https` origins，但不会补充未知协议；打开标签发现会使用页面真实 origin，可包含端口。
 - 子域发现依赖 Cookie 与当前打开 tabs；没有匹配 Cookie、没有打开 tab 且未显式输入的未知子域无法自动发现。
-- `storeId` 只影响 Cookies API 的查询和逐个删除，不限制 `chrome.browsingData.remove` 的清理范围。
+- `storeId` 仍仅影响 Cookies API 的查询和逐个删除，不限制 `chrome.browsingData.remove` 的清理范围，也不用于选择普通/隐身 profile。
 - `browsingData.ok: false` 时应检查 `browsingData.error`；即使 `browsingData` 失败，Cookie 兜底删除仍会继续执行。此时顶层 `ok` 为 `false`，但会保留 `browsingData` 与 `cookies` 明细。
 - 顶层 `ok` 表示核心 `browsingData.remove` 与 Cookie 兜底删除均未报告失败；tab 运行态清理、重载和 debugger detach 属于最佳努力增强步骤，不影响顶层 `ok`，应分别检查 `tabs.storageFailures`、`tabs.reloadFailures` 与 `tabs.debuggerDetachFailures`。
 - 扩展 API 不保证清理 HSTS、site permissions、media licenses、Shared Storage、Interest Groups、Storage Buckets 等浏览器内部站点数据。

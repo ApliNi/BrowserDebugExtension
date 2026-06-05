@@ -380,6 +380,70 @@ function normalizeOpenTabFocus(msg) {
   return msg.focus;
 }
 
+function normalizeOpenTabIncognito(msg) {
+  if (!msg || !Object.prototype.hasOwnProperty.call(msg, "incognito")) {
+    return false;
+  }
+
+  if (typeof msg.incognito !== "boolean") {
+    throw new Error("openTab incognito must be a boolean when provided.");
+  }
+
+  return msg.incognito;
+}
+
+function isAllowedIncognitoAccess() {
+  return new Promise((resolve, reject) => {
+    try {
+      chrome.extension.isAllowedIncognitoAccess((allowed) => {
+        const err = chrome.runtime?.lastError;
+        if (err) {
+          reject(new Error(err.message || String(err)));
+          return;
+        }
+
+        resolve(Boolean(allowed));
+      });
+    } catch (error) {
+      reject(error);
+    }
+  });
+}
+
+function createIncognitoWindow(url, focus) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const resolveOnce = (value) => {
+      if (settled) return;
+      settled = true;
+      resolve(value);
+    };
+    const rejectOnce = (error) => {
+      if (settled) return;
+      settled = true;
+      reject(error);
+    };
+
+    try {
+      const maybePromise = chrome.windows.create({ url, incognito: true, focused: focus }, (createdWindow) => {
+        const err = chrome.runtime?.lastError;
+        if (err) {
+          rejectOnce(new Error(err.message || String(err)));
+          return;
+        }
+
+        resolveOnce(createdWindow);
+      });
+
+      if (maybePromise && typeof maybePromise.then === "function") {
+        maybePromise.then(resolveOnce, rejectOnce);
+      }
+    } catch (error) {
+      rejectOnce(error);
+    }
+  });
+}
+
 async function getCreatedTabIdByTargetId(targetId) {
   if (!targetId) return null;
 
@@ -395,6 +459,37 @@ async function openTabViaDebugger(tabId, msg) {
   }
 
   const focus = normalizeOpenTabFocus(msg);
+  const incognito = normalizeOpenTabIncognito(msg);
+
+  if (incognito) {
+    const allowed = await isAllowedIncognitoAccess();
+    if (!allowed) {
+      throw new Error("openTab incognito requires allowing this extension to run in incognito mode.");
+    }
+
+    const createdWindow = await createIncognitoWindow(url, focus);
+    const windowId = Number.isInteger(createdWindow?.id) ? createdWindow.id : null;
+    const createdTab = Array.isArray(createdWindow?.tabs) ? createdWindow.tabs.find((tab) => Number.isInteger(tab?.id)) : null;
+    const createdTabId = Number.isInteger(createdTab?.id) ? createdTab.id : null;
+
+    if (!Number.isInteger(windowId)) {
+      throw new Error("chrome.windows.create did not return a valid incognito window id.");
+    }
+
+    if (createdWindow?.incognito !== true) {
+      throw new Error("chrome.windows.create did not return an incognito window.");
+    }
+
+    return {
+      ok: true,
+      incognito: true,
+      windowId,
+      tabId,
+      createdTabId,
+      sourceTabId: tabId,
+    };
+  }
+
   await ensureDebuggerAttached(tabId);
 
   const result = await chrome.debugger.sendCommand(attachTarget(tabId), "Target.createTarget", {
@@ -2565,6 +2660,21 @@ function normalizeSiteDataDomains(msg) {
   return Array.from(new Set(values.map(normalizeSiteDataDomain)));
 }
 
+function getClearSiteDataProfileScope(sender) {
+  const senderTab = sender?.tab;
+  const senderIncognito = typeof senderTab?.incognito === "boolean" ? senderTab.incognito : null;
+  if (senderIncognito === null) {
+    throw new Error("clearSiteData requires a sender tab with an incognito profile flag.");
+  }
+
+  return {
+    senderTabId: Number.isInteger(senderTab?.id) ? senderTab.id : null,
+    senderWindowId: Number.isInteger(senderTab?.windowId) ? senderTab.windowId : null,
+    senderIncognito,
+    tabFilteringApplied: true,
+  };
+}
+
 function siteDomainMatches(host, domain) {
   const normalizedHost = normalizeCookieDomain(host).toLowerCase();
   const normalizedDomain = normalizeSiteDataDomain(domain);
@@ -2645,13 +2755,15 @@ async function detachTemporarySiteDataDebuggers(temporaryAttachedTabs) {
   return { detached, failures };
 }
 
-async function collectMatchingSiteDataTabs(domains) {
+async function collectMatchingSiteDataTabs(domains, profileScope) {
   const tabs = await queryTabs({});
   const matchingTabs = [];
   const seenTabIds = new Set();
+  const filterIncognito = profileScope?.senderIncognito;
 
   for (const tab of tabs) {
     if (!Number.isInteger(tab?.id) || seenTabIds.has(tab.id)) continue;
+    if (typeof filterIncognito === "boolean" && tab.incognito !== filterIncognito) continue;
     if (typeof tab.url !== "string" || tab.url.trim() === "") continue;
 
     let url;
@@ -2670,6 +2782,7 @@ async function collectMatchingSiteDataTabs(domains) {
       tabId: tab.id,
       url: url.href,
       origin: url.origin,
+      incognito: tab.incognito === true,
     });
   }
 
@@ -2730,6 +2843,8 @@ async function clearOriginStorageViaDebugger(originList, matchingTabs, temporary
     return {
       attempted: 0,
       skipped: true,
+      driverTabId: null,
+      driverIncognito: null,
       reason: "No matching http/https tab is available for Chrome DevTools Protocol Storage.clearDataForOrigin.",
       cleared,
       failures,
@@ -2741,6 +2856,8 @@ async function clearOriginStorageViaDebugger(originList, matchingTabs, temporary
   } catch (error) {
     return {
       attempted: 0,
+      driverTabId: driverTab.tabId,
+      driverIncognito: typeof driverTab.incognito === "boolean" ? driverTab.incognito : null,
       cleared,
       failures: originList.map((origin) => ({ origin, tabId: driverTab.tabId, error: String(error?.message || error) })),
     };
@@ -2758,7 +2875,13 @@ async function clearOriginStorageViaDebugger(originList, matchingTabs, temporary
     }
   }
 
-  return { attempted: originList.length, cleared, failures };
+  return {
+    attempted: originList.length,
+    driverTabId: driverTab.tabId,
+    driverIncognito: typeof driverTab.incognito === "boolean" ? driverTab.incognito : null,
+    cleared,
+    failures,
+  };
 }
 
 async function reloadSiteDataTabs(matchingTabs) {
@@ -2834,7 +2957,8 @@ async function removeSiteDataCookies(cookies) {
   return { removed, failures };
 }
 
-async function clearSiteData(msg) {
+async function clearSiteData(msg, sender) {
+  const profileScope = getClearSiteDataProfileScope(sender);
   const domains = normalizeSiteDataDomains(msg || {});
   if (Object.prototype.hasOwnProperty.call(msg || {}, "storeId") && (typeof msg.storeId !== "string" || msg.storeId.trim() === "")) {
     throw new Error("clearSiteData storeId must be a non-empty string when provided.");
@@ -2865,7 +2989,7 @@ async function clearSiteData(msg) {
     }
   }
 
-  const matchingTabs = await collectMatchingSiteDataTabs(domains);
+  const matchingTabs = await collectMatchingSiteDataTabs(domains, profileScope);
   for (const item of matchingTabs) {
     let host = "";
     try {
@@ -2875,7 +2999,7 @@ async function clearSiteData(msg) {
     }
     if (host) discoveredHosts.add(host);
     origins.add(item.origin);
-    originSources.push({ source: "tab", tabId: item.tabId, url: item.url, origin: item.origin });
+    originSources.push({ source: "tab", tabId: item.tabId, url: item.url, origin: item.origin, incognito: item.incognito });
   }
 
   const pageStorage = clearSessionStorage
@@ -2929,6 +3053,8 @@ async function clearSiteData(msg) {
     debuggerStorage: {
       attempted: debuggerStorage.attempted,
       skipped: debuggerStorage.skipped === true,
+      driverTabId: Number.isInteger(debuggerStorage.driverTabId) ? debuggerStorage.driverTabId : null,
+      driverIncognito: typeof debuggerStorage.driverIncognito === "boolean" ? debuggerStorage.driverIncognito : null,
       reason: debuggerStorage.reason || null,
       cleared: debuggerStorage.cleared.length,
       failures: debuggerStorage.failures,
@@ -2955,6 +3081,24 @@ async function clearSiteData(msg) {
       "Only http and https origins derived from the input domains, discovered cookie domains, and matching open tab URL origins are cleared.",
       "Chrome extension APIs do not guarantee clearing HSTS, site permissions, media licenses, Shared Storage, Interest Groups, Storage Buckets, or other browser-internal site data. When a matching tab exists, Chrome DevTools Protocol Storage.clearDataForOrigin is also attempted as an extra best-effort cleanup layer.",
     ],
+    diagnostic: {
+      manifestIncognito: "split",
+      senderProfile: {
+        senderTabId: profileScope.senderTabId,
+        senderWindowId: profileScope.senderWindowId,
+        senderIncognito: profileScope.senderIncognito,
+      },
+      tabProfileFilter: {
+        applied: profileScope.tabFilteringApplied,
+        incognito: profileScope.senderIncognito,
+      },
+      requestedOptions: {
+        domains,
+        storeId: storeId || null,
+        reloadTabs,
+        clearSessionStorage,
+      },
+    },
   };
 }
 
@@ -3025,7 +3169,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     }
 
     if (action === "clearSiteData") {
-      const result = await clearSiteData(msg || {});
+      const result = await clearSiteData(msg || {}, sender);
       sendResponse(result);
       return;
     }
