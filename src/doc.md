@@ -24,6 +24,8 @@
 	- 等待网络空闲
 - 网络
 	- 跨域 Fetch
+- 页面
+	- 获取页面文本
 - 存储
 	- 读取字符串
 	- 写入字符串
@@ -1259,6 +1261,167 @@ console.log(streamResponse instanceof Response, await streamResponse.arrayBuffer
 - 重建 `Response` 时 `url`、`redirected`、`type` 是 best-effort 补充字段，不应作为强一致安全判断依据。
 - 该能力依赖 manifest 要求的 Chrome 148+ 对扩展消息 structured clone 的支持；不同 Chrome 版本对可克隆对象、流、`Blob`/`File` 元数据等支持存在限制。
 - 这是高风险跨域能力：可访问页面脚本原本受 CORS 限制的数据，也可能携带敏感请求头或上传敏感内容。仅应在可信页面、可信 token 与明确授权的自动化流程中使用。
+
+
+
+### 页面.获取页面文本 `getPageText`
+
+> DOM 文本提取、选择器范围、当前快照、隐私风险
+
+从当前调用 tab 的页面 DOM 中提取可捕获文本。默认提取整个当前 DOM 快照；传入 `selector`、`selectorText` 时按完整元素定位规则限定提取范围，支持字符串、字符串数组和对象表达式（`AND` / `OR` / `final`），同时传入时先按 `selector` 收集候选，再按 `selectorText` 过滤。提取结果按 DOM 顺序拼接，默认包含所有可捕获 DOM 文本、属性文本与表单内容。
+
+相关/关联功能描述。
+- 项目.元素定位与 selectorText
+- 项目.安全风险与边界
+- 项目.返回约定
+
+#### 输入
+
+```json
+{
+	"action": "getPageText",
+	"type": "getPageText",
+	"selector": {
+		"AND": ["main", "form"],
+		"final": "form"
+	},
+	"selectorText": {
+		"OR": ["登录", "Login"]
+	},
+	"includeIframes": true,
+	"filterVisibility": false,
+	"extraAttributes": ["data-title", "class"],
+	"timeoutMs": 10000
+}
+```
+
+#### 输出
+
+```json
+{
+	"ok": true,
+	"tabId": 123,
+	"text": "页面中提取到的文本...",
+	"length": 12,
+	"truncated": false,
+	"timeout": false,
+	"sourceCounts": {
+		"title": 1,
+		"textNode": 8,
+		"formValue": 2,
+		"imageAlt": 1,
+		"attributeText": 3,
+		"placeholder": 1,
+		"extraAttribute": 2
+	},
+	"candidates": 1,
+	"textCandidates": 1
+}
+```
+
+`candidates`、`textCandidates` 只在使用定位范围时用于诊断候选规模，具体是否出现取决于本次定位输入与实现可用信息。
+
+#### 示例
+
+```js
+// 提取当前页面可捕获的全部 DOM 文本。
+const pageText = await debug({ action: 'getPageText' });
+console.log(pageText.text, pageText.length);
+
+// 只提取 main 区域中的文本。
+const mainText = await debug({
+	action: 'getPageText',
+	selector: 'main',
+});
+
+// 使用 selectorText 定位最小文本范围后提取。
+const loginText = await debug({
+	action: 'getPageText',
+	selectorText: '登录',
+	timeoutMs: 10000,
+});
+
+// selector + selectorText 组合：先限定候选，再按文本过滤。
+const formText = await debug({
+	action: 'getPageText',
+	selector: 'form.login',
+	selectorText: { OR: ['登录', 'Login'] },
+});
+
+// 额外提取指定属性。节点内容在前，属性在后。
+const customAttributeText = await debug({
+	action: 'getPageText',
+	selector: '.card',
+	extraAttributes: ['data-title', 'class'],
+});
+
+// 只提取当前可见/可访问的文本。默认不启用该过滤。
+const visibleText = await debug({
+	action: 'getPageText',
+	filterVisibility: true,
+});
+```
+
+#### 文本拼接规则
+
+`getPageText` 使用稳定的节点块格式输出，避免调用方基于固定文本匹配时因属性与内容混排而失效。
+
+- 遍历顺序为 DOM 顺序。
+- 块级/控件/图片/带属性节点会形成稳定文本块；纯 inline 子树会尽量合并在同一内容块中，避免 `A<span>B</span>C` 被拆成多段。
+- 没有内容也没有属性的节点会被忽略，不产生空行。
+- 同一节点内，节点内容永远在前，属性文本永远在后。
+- 节点内容与属性文本之间使用一个换行分隔。
+- 同一节点的多个属性文本之间使用一个空格分隔，并按默认属性列表顺序 + `extraAttributes` 传入顺序输出。
+- 不同有效节点块之间使用两个换行分隔。
+- `<br>` 会在所在内容块内产生单个换行。
+- 文本节点内部换行按类似 `textContent` 的方式保留换行边界，并将 `\r\n` / `\r` 规范化为 `\n`；水平空白会折叠为单个空格，行首尾空白会被裁剪。
+
+例如：
+
+```html
+<p title="属性">内容</p>
+<p data-title="额外" class="card">第一行
+第二行</p>
+```
+
+调用：
+
+```js
+await debug({
+	action: 'getPageText',
+	includeTitle: false,
+	extraAttributes: ['data-title', 'class'],
+});
+```
+
+输出 `text`：
+
+```txt
+内容
+属性
+
+第一行
+第二行
+额外 card
+```
+
+#### 注意事项
+
+- `timeoutMs` 可选，默认 `10000` 毫秒；超时的真实语义是返回已收集到的部分结果，仍为 `ok: true`，并将 `timeout: true`、`truncated: true`。调用方应检查这两个字段，避免把部分结果误当完整页面文本。
+- `selector` / `selectorText` 支持完整元素定位范围：字符串、字符串数组、`AND`、`OR`、`final`；只传 `selectorText` 时会全 DOM 查找并选择最小匹配元素作为提取范围。即使使用 `selector` / `selectorText` 限定了局部提取范围，默认仍会额外包含 `document.title`，只有显式传 `includeTitle: false` 才排除标题。
+- 不支持 `maxChars`、`maxNodes` 等截断/节点数量限制参数；调用方不要依赖这些字段限制输出规模。
+- `extraAttributes` 可选，必须是字符串数组；用于追加提取默认列表之外的属性，例如 `['data-title', 'class']`。重复属性会去重，非法属性名会抛错。显式传入的 `extraAttributes` 不受 `includeAttributeText: false` 影响，因此可用于关闭默认属性抓取但保留指定属性。
+- `sourceCounts` 使用实现中的真实来源 key 统计已加入片段数量，常见 key 包括 `title`、`textNode`、`formValue`、`imageAlt`、`attributeText`、`placeholder`、`extraAttribute`、`labelText`、`optionText`、`inaccessibleFrame` 等；具体字段取决于页面内容与本次提取选项。
+- 默认包含所有可捕获 DOM 文本、属性文本与表单内容，包括 `input[type="password"]`、`input[type="hidden"]` 等输入值；这可能泄露密码、token、隐藏字段、表单草稿和其他敏感信息。
+- 默认包含 `placeholder`，即使控件已有当前值也会一并输出，目的是保留所有可捕获的面向用户提示文本。
+- 可见性过滤默认关闭，因此会尽量输出完整 DOM 内容，包括当前被 dialog/modal 临时设置为 `inert` 或 `aria-hidden="true"` 的背景内容。
+- 如需只提取当前可见/可访问内容，可传 `filterVisibility: true`，或等价传 `visibilityMode: 'visible'`。开启后会跳过常见隐藏元素及其子树，包括 `hidden`、`inert`、`aria-hidden="true"`、`display:none`、`visibility:hidden/collapse`、`content-visibility:hidden`；`aria-labelledby` / `aria-describedby` 引用文本和 associated labels 也会应用同样过滤。`input[type="hidden"]` 不会仅因为浏览器默认 `display:none` 被排除，除非元素本身也符合上述显式隐藏条件。
+- 这是高隐私风险能力，仅应在可信页面、可信 token 与明确授权的自动化流程中使用；不要把返回文本发送给不可信服务或日志系统。
+- 返回内容是调用时的当前 DOM 快照，不会持续监听后续 DOM 变化；动态渲染、异步加载或用户输入变化可能导致多次调用结果不同。
+- 文本按 DOM 顺序收集和拼接，不代表页面视觉顺序、阅读顺序或可访问性树顺序。
+- 该接口不是 OCR，不会识别图片、canvas、视频帧、PDF 渲染层或浏览器 UI 中的文字；只能提取页面脚本可访问的 DOM/属性/表单内容。
+- 元素定位（`selector` / `selectorText` / `final` 的范围选择）只在当前文档 DOM 内执行，不进入 iframe/frame 或 shadowRoot；定位到范围后进行文本提取时，默认会尝试读取该范围内可访问的 iframe/frame 文档与 open shadowRoot。closed shadowRoot、跨源 iframe、跨源隔离页面等实际可捕获范围仍受浏览器、页面结构、扩展权限与 Debugger 执行上下文限制。
+
 
 
 

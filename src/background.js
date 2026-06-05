@@ -1378,6 +1378,425 @@ function buildGetElementCoordinatesExpression({ selector, selectorText, afterFou
   `.trim();
 }
 
+function normalizeGetPageTextOptions(msg = {}) {
+  const timeoutMs = msg.timeoutMs == null ? 10000 : msg.timeoutMs;
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    throw new Error("getPageText timeoutMs must be a finite positive number.");
+  }
+
+  const extraAttributes = msg.extraAttributes == null ? [] : msg.extraAttributes;
+  if (!Array.isArray(extraAttributes)) {
+    throw new Error("getPageText extraAttributes must be an array when provided.");
+  }
+
+  const normalizedExtraAttributes = [];
+  const seenExtraAttributes = new Set();
+  for (const item of extraAttributes) {
+    const name = String(item ?? "").trim();
+    if (!name) continue;
+    if (/\s|["'<>/=]/.test(name)) {
+      throw new Error("getPageText extraAttributes contains an invalid attribute name: " + name);
+    }
+    const key = name.toLowerCase();
+    if (seenExtraAttributes.has(key)) continue;
+    seenExtraAttributes.add(key);
+    normalizedExtraAttributes.push(name);
+  }
+
+  return {
+    selector: normalizeElementTargetPayload(msg.selector),
+    selectorText: normalizeElementTargetPayload(msg.selectorText),
+    timeoutMs,
+    includeTitle: msg.includeTitle !== false,
+    includeFormValues: msg.includeFormValues !== false,
+    includeAttributeText: msg.includeAttributeText !== false,
+    includePlaceholder: msg.includePlaceholder !== false,
+    includeShadowDom: msg.includeShadowDom !== false,
+    includeIframes: msg.includeIframes !== false,
+    includeAllSelectOptions: msg.includeAllSelectOptions !== false,
+    extraAttributes: normalizedExtraAttributes,
+    filterVisibility: msg.filterVisibility === true || msg.visibilityMode === "visible",
+  };
+}
+
+function buildGetPageTextExpression(msg = {}) {
+  const injected = JSON.stringify(normalizeGetPageTextOptions(msg));
+
+  return `
+(async () => {
+  const options = ${injected};
+  const { selector, selectorText } = options;
+  ${ELEMENT_FINDER_HELPER}
+
+  const deadline = Date.now() + options.timeoutMs;
+  const entries = [];
+  const sourceCounts = {};
+  let timedOut = false;
+
+  const userTextAttributes = [
+    "alt",
+    "title",
+    "aria-label",
+    "aria-labelledby",
+    "aria-describedby",
+    "aria-description",
+    "aria-placeholder",
+    "aria-roledescription",
+    "aria-valuetext",
+    "placeholder",
+    "label",
+    "summary",
+  ];
+
+  const allTextAttributes = (() => {
+    const seen = new Set();
+    const result = [];
+    for (const name of [...userTextAttributes, ...(options.extraAttributes || [])]) {
+      const key = String(name).toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      result.push(name);
+    }
+    return result;
+  })();
+  const extraAttributeSet = new Set((options.extraAttributes || []).map((name) => String(name).toLowerCase()));
+
+  const voidLikeTags = new Set(["INPUT", "IMG", "AREA", "BR", "HR", "META", "LINK"]);
+  const skippedTextContainers = new Set(["SCRIPT", "STYLE", "TEMPLATE"]);
+  const blockBoundaryTags = new Set([
+    "ADDRESS", "ARTICLE", "ASIDE", "BLOCKQUOTE", "BODY", "BUTTON", "DD", "DETAILS", "DIALOG", "DIV", "DL", "DT",
+    "FIELDSET", "FIGCAPTION", "FIGURE", "FOOTER", "FORM", "H1", "H2", "H3", "H4", "H5", "H6", "HEADER",
+    "HR", "HTML", "IFRAME", "IMG", "INPUT", "LI", "MAIN", "NAV", "OL", "P", "PRE", "SECTION", "SELECT",
+    "TABLE", "TBODY", "TD", "TEXTAREA", "TFOOT", "TH", "THEAD", "TR", "UL",
+  ]);
+
+  const countSource = (source) => {
+    sourceCounts[source] = (sourceCounts[source] || 0) + 1;
+  };
+
+  const normalizeText = (value, preserveWhitespace = false) => {
+    const text = String(value ?? "");
+    if (preserveWhitespace) return text.replace(/\\r\\n?/g, "\\n").trim();
+    return text.replace(/[\\t\\n\\r ]+/g, " ").trim();
+  };
+
+  const normalizeContentText = (value) => String(value ?? "")
+    .replace(/\\r\\n?/g, "\\n")
+    .replace(/[\\t ]+/g, " ")
+    .split("\\n")
+    .map((line) => line.trim())
+    .join("\\n")
+    .replace(/^\\n+|\\n+$/g, "");
+
+  const normalizeAttributeText = (value) => normalizeText(value, false);
+
+  const pushEntry = (contentItems, attributeItems) => {
+    if (Date.now() > deadline) {
+      timedOut = true;
+      return false;
+    }
+
+    const content = contentItems
+      .map((item) => normalizeContentText(item.text))
+      .filter(Boolean)
+      .join("\\n");
+    const attributes = attributeItems
+      .map((item) => normalizeAttributeText(item.text))
+      .filter(Boolean);
+
+    if (!content && !attributes.length) return true;
+
+    entries.push({ content, attributes });
+    for (const item of contentItems) {
+      if (normalizeContentText(item.text)) countSource(item.source);
+    }
+    for (const item of attributeItems) {
+      if (normalizeAttributeText(item.text)) countSource(item.source);
+    }
+    return true;
+  };
+
+  const getReferencedText = (ids) => {
+    const normalizedIds = String(ids || "").trim();
+    if (!normalizedIds) return "";
+    return normalizedIds
+      .split(/\\s+/)
+      .map((id) => document.getElementById?.(id))
+      .filter(Boolean)
+      .filter((node) => !options.filterVisibility || !isHiddenBySelfOrAncestor(node))
+      .map((node) => normalizeText(node.innerText || node.textContent || node.getAttribute?.("aria-label") || ""))
+      .filter(Boolean)
+      .join(" ");
+  };
+
+  const collectAttributeText = (el) => {
+    const attributes = [];
+
+    for (const attr of allTextAttributes) {
+      const isExtraAttribute = extraAttributeSet.has(String(attr).toLowerCase());
+      if (!options.includeAttributeText && !isExtraAttribute) continue;
+
+      if (attr === "aria-labelledby" || attr === "aria-describedby") {
+        const referenced = getReferencedText(el.getAttribute?.(attr));
+        attributes.push({ text: referenced, source: "attributeText" });
+        continue;
+      }
+
+      if (attr === "alt" && el.tagName === "IMG") {
+        attributes.push({ text: el.getAttribute?.("alt"), source: "imageAlt" });
+        continue;
+      }
+
+      if (attr === "placeholder") {
+        if (options.includePlaceholder) attributes.push({ text: el.getAttribute?.("placeholder"), source: "placeholder" });
+        continue;
+      }
+
+      if (attr === "label" && el.tagName === "OPTION") {
+        const label = el.getAttribute?.("label");
+        if (label && normalizeText(label) !== normalizeText(el.textContent)) attributes.push({ text: label, source: "attributeText" });
+        continue;
+      }
+
+      attributes.push({ text: el.getAttribute?.(attr), source: isExtraAttribute ? "extraAttribute" : "attributeText" });
+    }
+    return attributes;
+  };
+
+  const collectAssociatedLabels = (el) => {
+    const content = [];
+    const labels = Array.from(el.labels || []);
+    for (const label of labels) {
+      if (options.filterVisibility && isHiddenBySelfOrAncestor(label)) continue;
+      content.push({ text: label.innerText || label.textContent, source: "labelText" });
+    }
+    return content;
+  };
+
+  const selectedOptionText = (option) => normalizeText(option?.label || option?.textContent || option?.value || "");
+
+  const collectFormContent = (el) => {
+    const content = [];
+    if (!options.includeFormValues) return { handled: false, content };
+
+    if (el.tagName === "TEXTAREA") {
+      content.push(...collectAssociatedLabels(el), { text: el.value, source: "formValue" });
+      return { handled: true, content };
+    }
+
+    if (el.tagName === "SELECT") {
+      content.push(...collectAssociatedLabels(el));
+      const selected = Array.from(el.selectedOptions || []).map(selectedOptionText).filter(Boolean);
+      if (selected.length) content.push({ text: selected.join(", "), source: "formValue" });
+
+      if (options.includeAllSelectOptions) {
+        const allOptions = Array.from(el.options || []).map(selectedOptionText).filter(Boolean);
+        if (allOptions.length) content.push({ text: allOptions.join(", "), source: "optionText" });
+      }
+      return { handled: true, content };
+    }
+
+    if (el.tagName === "OPTION") {
+      content.push({ text: el.label || el.textContent || el.value, source: "optionText" });
+      return { handled: true, content };
+    }
+
+    if (el.tagName === "INPUT") {
+      content.push(...collectAssociatedLabels(el));
+      const type = String(el.type || el.getAttribute?.("type") || "text").toLowerCase();
+      if (type === "checkbox" || type === "radio") {
+        content.push({ text: (el.checked ? "checked" : "unchecked") + (el.value ? ": " + el.value : ""), source: "formValue" });
+      } else {
+        content.push({ text: el.value, source: "formValue" });
+      }
+      return { handled: true, content };
+    }
+
+    if (el.tagName === "BUTTON") {
+      if (el.value) content.push({ text: el.value, source: "formValue" });
+      return { handled: false, content };
+    }
+
+    return { handled: false, content };
+  };
+
+  const collectDirectTextContent = (el) => {
+    const parts = [];
+    for (const child of Array.from(el.childNodes || [])) {
+      if (child.nodeType === Node.TEXT_NODE) parts.push(child.nodeValue || child.textContent || "");
+    }
+    return parts.join("");
+  };
+
+  const collectInlineTextContent = (node, root) => {
+    if (!node) return "";
+    if (node.nodeType === Node.TEXT_NODE) return node.nodeValue || node.textContent || "";
+    if (node.nodeType !== Node.ELEMENT_NODE) return "";
+    if (skippedTextContainers.has(node.tagName)) return "";
+    if (options.filterVisibility && node !== root && isHiddenBySelfOrAncestor(node)) return "";
+    if (node.tagName === "BR") return "\\n";
+    if (blockBoundaryTags.has(node.tagName) && node !== root) return "";
+    return Array.from(node.childNodes || []).map((child) => collectInlineTextContent(child, root)).join("");
+  };
+
+  const hasBoundaryChildren = (el) => Array.from(el.childNodes || [])
+    .some((child) => child.nodeType === Node.ELEMENT_NODE && blockBoundaryTags.has(child.tagName) && child.tagName !== "BR");
+
+  const hasAttributeFlag = (el, name) => {
+    if (typeof el.hasAttribute === "function") return el.hasAttribute(name);
+    return el.getAttribute?.(name) != null;
+  };
+
+  const isElementHidden = (el) => {
+    if (hasAttributeFlag(el, "hidden")) return true;
+    if (hasAttributeFlag(el, "inert") || el.inert === true) return true;
+    if (String(el.getAttribute?.("aria-hidden") || "").toLowerCase() === "true") return true;
+
+    const isHiddenInput = el.tagName === "INPUT" && String(el.type || el.getAttribute?.("type") || "").toLowerCase() === "hidden";
+
+    let style = null;
+    try {
+      style = window.getComputedStyle?.(el) || (typeof getComputedStyle === "function" ? getComputedStyle(el) : null);
+    } catch (error) {
+      style = null;
+    }
+    if (!style) return false;
+    if (isHiddenInput) return false;
+    if (style.display === "none") return true;
+    if (style.visibility === "hidden" || style.visibility === "collapse") return true;
+    if (style.contentVisibility === "hidden") return true;
+    return false;
+  };
+
+  const isHiddenBySelfOrAncestor = (el) => {
+    for (let current = el; current && current.nodeType === Node.ELEMENT_NODE; current = current.parentElement) {
+      if (isElementHidden(current)) return true;
+    }
+    return false;
+  };
+
+  const composedChildren = (el) => {
+    const children = Array.from(el.childNodes || []);
+    if (options.includeShadowDom && el.shadowRoot) children.push(...Array.from(el.shadowRoot.childNodes || []));
+    return children;
+  };
+
+  const walkIframe = (el, suppressText) => {
+    if (!options.includeIframes || el.tagName !== "IFRAME" && el.tagName !== "FRAME") return;
+    try {
+      const doc = el.contentDocument || el.contentWindow?.document;
+      if (doc) walk(doc, suppressText);
+    } catch (error) {
+      countSource("inaccessibleFrame");
+    }
+  };
+
+  const walk = (node, suppressText = false) => {
+    if (!node || timedOut) return;
+    if (Date.now() > deadline) {
+      timedOut = true;
+      return;
+    }
+
+    if (node.nodeType === Node.TEXT_NODE) {
+      const parentTag = node.parentElement?.tagName;
+      if (!suppressText && !skippedTextContainers.has(parentTag)) {
+        pushEntry([{ text: node.nodeValue || node.textContent, source: "textNode" }], []);
+      }
+      return;
+    }
+
+    if (node.nodeType !== Node.ELEMENT_NODE && !(node instanceof Document)) return;
+
+    const el = node;
+    if (el instanceof Document) {
+      walk(el.body || el.documentElement, suppressText);
+      return;
+    }
+
+    if (skippedTextContainers.has(el.tagName)) return;
+    if (options.filterVisibility && isHiddenBySelfOrAncestor(el)) return;
+
+    if (el.tagName === "BR") {
+      if (!suppressText) pushEntry([{ text: "\\n", source: "textNode" }], []);
+      return;
+    }
+
+    const form = collectFormContent(el);
+    const contentItems = [];
+    contentItems.push(...form.content);
+    const attributeItems = collectAttributeText(el);
+    const hasAttributes = attributeItems.some((item) => normalizeAttributeText(item.text));
+    const directTextContent = form.handled ? "" : collectDirectTextContent(el);
+    const hasBoundaryElementChildren = hasBoundaryChildren(el);
+    const inlineTextContent = form.handled ? "" : collectInlineTextContent(el, el);
+    const shouldMergeInlineText = !form.handled && inlineTextContent && !hasBoundaryElementChildren;
+    if (shouldMergeInlineText) {
+      contentItems.unshift({ text: inlineTextContent, source: "textNode" });
+    } else if (!form.handled && directTextContent) {
+      contentItems.unshift({ text: directTextContent, source: "textNode" });
+    }
+
+    pushEntry(contentItems, attributeItems);
+    walkIframe(el, suppressText || hasAttributes);
+
+    if (!form.handled || !voidLikeTags.has(el.tagName)) {
+      for (const child of composedChildren(el)) {
+        if (shouldMergeInlineText) continue;
+        if (directTextContent && child.nodeType === Node.TEXT_NODE) continue;
+        walk(child, suppressText);
+      }
+    }
+  };
+
+  const hasTarget = isExpressionValue(selector) || isExpressionValue(selectorText);
+  let root = document.body || document.documentElement;
+  let candidates;
+  let textCandidates;
+
+  if (hasTarget) {
+    const picked = pickElement({ selector, selectorText });
+    if (!picked.ok) return picked;
+    root = picked.el;
+    candidates = picked.candidates;
+    textCandidates = picked.textCandidates;
+  }
+
+  if (options.includeTitle) pushEntry([{ text: document.title, source: "title" }], []);
+  walk(root);
+
+  const text = entries
+    .map((entry) => {
+      const lines = [];
+      if (entry.content) lines.push(entry.content);
+      if (entry.attributes.length) lines.push(entry.attributes.join(" "));
+      return lines.join("\\n");
+    })
+    .filter(Boolean)
+    .join("\\n\\n");
+  return {
+    ok: true,
+    text,
+    length: text.length,
+    timeout: timedOut,
+    truncated: timedOut,
+    sourceCounts,
+    candidates,
+    textCandidates,
+  };
+})()
+  `.trim();
+}
+
+async function getPageText(tabId, msg = {}) {
+  const expression = buildGetPageTextExpression(msg);
+  const result = await runInPageViaDebugger(tabId, expression);
+  if (!result?.ok) {
+    throw new Error(result?.error || "getPageText failed");
+  }
+  return result;
+}
+
 function normalizeForegroundMaskConfig(config) {
   return {
     maskVisibility: config?.maskVisibility !== false,
@@ -3140,6 +3559,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     const needsTab =
       action === "waitNetworkIdle" ||
       action === "openTab" ||
+      action === "getPageText" ||
       action === "waitForElement" ||
       action === "waitUrlMatch" ||
       action === "click" ||
@@ -3261,6 +3681,13 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       }
 
       sendResponse({ ok: true, tabId, attempts: result.attempts ?? 1, candidates: result?.candidates ?? 0, textCandidates: result?.textCandidates });
+      return;
+    }
+
+    if (action === "getPageText") {
+      await ensureDebuggerAttached(tabId);
+      const result = await getPageText(tabId, msg || {});
+      sendResponse({ ok: true, tabId, ...result });
       return;
     }
 
